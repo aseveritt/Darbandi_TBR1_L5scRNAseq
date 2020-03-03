@@ -1,0 +1,354 @@
+---
+title: "Examine DE genes and perform GO where needed"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+__Author:__ Amanda Everitt  
+__Began:__ 8/22/2018  
+__Finished:__: 8/23/2018  
+
+
+
+###[Motivation] 
+At the conclusion of the last script we ran 5 different DEX comparisons
+- Neuronal group 2 vs group 1
+- Neuronal WT vs Neuronal NULL
+- Neuronal WT vs Neuronal HET
+- Tbr1+ Neuronal WT vs Tbr1+ Neuronal NULL
+- Tbr1+ Neuronal WT vs Tbr1+ Neuronal HET
+
+Lets see how the compare to each other and if there is a Tbr1 dosage effect
+
+
+
+```{r, include=FALSE}
+rm(list=ls())
+suppressPackageStartupMessages({
+    library(knitr)
+    library(VennDiagram)
+    library(gridExtra)
+    library(plyr)
+    library(grid)
+    library(reshape2)
+    library(TxDb.Mmusculus.UCSC.mm10.ensGene)
+    library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+    library(goseq)
+    library(ggplot2)
+    library(GO.db)
+})
+wd <- "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/scripts"
+opts_knit$set(root.dir = wd)
+out_dir = "outputs/output_05"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r, include=F}
+amanda.plot.genes <- function(genes_to_plot){
+  plots_list <- list()
+
+  for (i in genes_to_plot){
+    a <- as.data.frame(Matrix::colSums(experiment.aggregate@data[i, , drop = FALSE]))
+    a$sample_type <- "WT"
+    a[grep("NULL", rownames(a)),]$sample_type <- "NULL"
+    a[grep("HET", rownames(a)),]$sample_type <- "HET"
+    colnames(a) <- c("count","sample_type")
+    p1<- ggplot(a, aes(x=count, fill=sample_type)) + 
+      geom_density(alpha= 0.3) +
+      scale_x_continuous(name="Normalized counts per cell") +
+      ylim(0,1) + ylab("Density") +
+      ggtitle(paste0("Density of ", i," expression"))
+    plots_list[[i]] <- p1
+  }
+  return(plots_list)
+}
+```
+
+
+
+###How many DEX genes do we have?
+```{r}
+full_list <- list()
+DE_list <- list()
+hcDE_list <- list()
+GENEoverlap = data.frame(Gene=character(), File=character())
+
+for (i in list.files(path=paste0(wd,"/outputs/output_04"), pattern="*.csv", full.names = T)){
+  name = tools::file_path_sans_ext(basename(i))
+  cat(name,"\n")
+  full.file = read.csv(i, row.names = 1)
+  rownames(full.file) <- full.file$gene
+  full_list[[name]] <- full.file
+  
+  dex.file = full.file[full.file$fdr < 0.05, ]
+  cat(nrow(dex.file), "dex genes\n")
+  DE_list[[name]] <- dex.file
+  write.csv(dex.file, paste0(out_dir, "/DE_", name, ".csv"))
+  
+  hc.dex.file = dex.file[abs(dex.file$logfc) > 1 & is.na(dex.file$logfc) == FALSE, ]
+  cat(nrow(hc.dex.file), "dex genes logfc > or < 1\n")
+  hcDE_list[[name]] <- hc.dex.file
+  write.csv(hc.dex.file, paste0(out_dir, "/hcDE", name, ".csv"))
+  
+  temp <- data.frame(Gene=dex.file$gene, 
+                     File=rep(name, length(rownames(dex.file))), 
+                     Direction=ifelse(dex.file$logfc >0 , 'UP', 'DOWN')
+                     )
+  GENEoverlap <- merge(x=GENEoverlap, y=temp, all.x=TRUE, all.y=TRUE)
+}
+
+
+GENEoverlap <- ddply(GENEoverlap, .(Gene,Direction), summarize, Count=length(unique(File)), Files=paste(unique(File),collapse=","))
+write.csv(GENEoverlap, paste0(out_dir,"/overlapping_gene.csv"),row.names = FALSE)
+```
+
+
+```{r, echo=F, fig.width=10, fig.height=20}
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger") #don't output log files
+
+vennPlot1 = venn.diagram(list(Group2vsGroup1 = rownames(DE_list[["Group2vsGroup1"]]), 
+                              WTvsNULL = rownames(DE_list[["WTvsNULL"]]), 
+                              WTvsHET = rownames(DE_list[["WTvsHET"]])),
+                        fill = c("blue", "red", "green"), main="Overlap with neuronal DEX genes",
+                        alpha = c(0.5, 0.5, 0.5), cex = 2, filename = NULL)
+vennPlot2 = venn.diagram(list(WTvsNULL = rownames(DE_list[["WTvsNULL"]]), 
+                              WTvsHET = rownames(DE_list[["WTvsHET"]])),
+                        fill = c("blue", "red"), main="Same as above (w/out other analysis)",
+                        alpha = c(0.5, 0.5), cex = 2, filename = NULL)
+
+vennPlot3 = venn.diagram(list(Tbr1_HET = rownames(DE_list[["Tbr1_WTvsTbr1_HET"]]), 
+                              Tbr1_NULL = rownames(DE_list[["Tbr1_WTvsTbr1_NULL"]])), 
+                        fill = c("blue", "red"), main="Overlap with Tbr1+ neuronal DEX genes",
+                        alpha = c(0.5, 0.5), cex = 2, filename = NULL)
+
+grid.arrange(grobTree(vennPlot1), grobTree(vennPlot2),  grobTree(vennPlot3), ncol=1)
+```
+
+### What are those three that occur in all 5 comparisons
+```{r}
+head(GENEoverlap[GENEoverlap$Count == 5, 1:2])
+```
+
+
+### Lets apply a logFC cut-off to see if there are any strong signals
+```{r, fig.width=10, fig.height=10, echo=F}
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger") #don't output log files
+
+vennPlot1 = venn.diagram(list(Group2vsGroup1 = rownames(hcDE_list[["Group2vsGroup1"]]), 
+                              WTvsNULL = rownames(hcDE_list[["WTvsNULL"]]), 
+                              WTvsHET = rownames(hcDE_list[["WTvsHET"]])),
+                        fill = c("blue", "red", "green"), main="Overlap with neuronal hcDEX genes",
+                        alpha = c(0.5, 0.5, 0.5), cex = 2, filename = NULL)
+vennPlot2 = venn.diagram(list(Tbr1_HET = rownames(hcDE_list[["Tbr1_WTvsTbr1_HET"]]), 
+                              Tbr1_NULL = rownames(hcDE_list[["Tbr1_WTvsTbr1_NULL"]])), 
+                        fill = c("blue", "red"), main="Overlap with Tbr1+ neuronal hcDEX genes",
+                        alpha = c(0.5, 0.5), cex = 2, filename = NULL)
+
+grid.arrange(grobTree(vennPlot1), grobTree(vennPlot2), ncol=1)
+```
+
+### Calm2, Fau, and Tpt1 are retained. What are the other 29 (32-3) that occur in the other comparisons?
+```{r}
+genes29 <- intersect(intersect(rownames(hcDE_list[["Group2vsGroup1"]]), 
+          rownames(hcDE_list[["WTvsNULL"]])),
+          rownames(hcDE_list[["WTvsHET"]]))
+
+GENEoverlap[GENEoverlap$Gene %in% genes29, c(1:2)]
+```
+
+
+### Interesting, are there any DEX genes that we saw in the L6 Tbr1 paper?
+```{r}
+bulk_L6 <- read.table("../raw_data/L6_Null_vs_L6_WT-_List_of_significant_genes.txt", header = T)
+
+vennPlot1 = venn.diagram(list(single_cell_L5_NULL =  rownames(DE_list[["WTvsNULL"]]),
+                              bulk_seq_L6_NULL = bulk_L6$GeneID),
+                        fill = c("blue", "red"), main="Overlapping DEX with L6 bulk paper",
+                        alpha = c(0.5, 0.5), cex = 2, filename = NULL)
+grid.arrange(grobTree(vennPlot1), ncol=1)
+```
+
+```{r}
+tmp <- bulk_L6[bulk_L6$GeneID %in% intersect(rownames(DE_list[["WTvsNULL"]]), bulk_L6$GeneID), ]
+a <- DE_list[["WTvsNULL"]]
+tmp2 <- a[a$gene %in% intersect(rownames(DE_list[["WTvsNULL"]]), bulk_L6$GeneID), ]
+
+tmp3 <- merge(tmp[,c("GeneID","FDR","logFC")], tmp2[,c("gene","fdr","logfc")], by.x= "GeneID", by.y="gene", all=T)
+colnames(tmp3) <- c("gene","bulk_FDR","bulk_logFC","sc_FDR","sc_logFC")
+tmp3
+```
+
+
+### Any ASD/NDD genes in this list?
+```{r}
+ASD_99 <- read.csv("../raw_data/ASD_100_short.csv", header = F)
+NDD_99 <- read.csv("../raw_data/NDD_Genes.csv")
+
+vennPlot1 = venn.diagram(list(DE_single_cell = na.omit(toupper(GENEoverlap$Gene)),
+                              NDD = NDD_99$Gene),
+                        fill = c("blue", "red"), main="Overlapping with NDD list",
+                        alpha = c(0.5, 0.5), cex = 2, filename = NULL)
+vennPlot2 = venn.diagram(list(DE_single_cell = na.omit(toupper(GENEoverlap$Gene)),
+                              ASD = ASD_99$V1),
+                        fill = c("blue", "yellow"), main="Overlapping with ASD list",
+                        alpha = c(0.5, 0.5), cex = 2, filename = NULL)
+grid.arrange(grobTree(vennPlot1),grobTree(vennPlot2),  ncol=1)
+```
+
+### Which ASD?
+```{r}
+GENEoverlap[toupper(GENEoverlap$Gene) %in% intersect(na.omit(toupper(GENEoverlap$Gene)), ASD_99$V1), ]
+```
+
+### Which NDD?
+```{r}
+GENEoverlap[toupper(GENEoverlap$Gene) %in% intersect(na.omit(toupper(GENEoverlap$Gene)), NDD_99$Gene), ]
+```
+
+### What genes are unique to HET vs NULL
+```{r}
+uniquetoNULL <- setdiff(rownames(DE_list[["WTvsNULL"]]), rownames(DE_list[["WTvsHET"]]))
+uniquetoHET <- setdiff(rownames(DE_list[["WTvsHET"]]), rownames(DE_list[["WTvsNULL"]]))
+
+het.df <- DE_list[["WTvsHET"]]
+b<- het.df[uniquetoHET, ]
+head(b[order(b$fdr, decreasing = F),], n=20)
+
+null.df <- DE_list[["WTvsNULL"]]
+a<- null.df[uniquetoNULL, ]
+head(a[order(a$fdr, decreasing = F),], n=20)
+```
+
+```{r, echo=F,  fig.width=10, fig.height=10, message=F, warning=F}
+load(paste0(wd,"/outputs/output_03/neuronal_object.RData"))
+marrangeGrob(grobs=amanda.plot.genes(c("Uba52","Pfn1")), nrow=2, ncol=1) #Looks good to me
+```
+
+##### Hmm I could see looking into Uba52 maybe if that's of interest. It looks like the effect is specific to NULL. Pfn1 (and other genes) are less convincing.
+
+### Of the HETvWT and NULLvWT does there look like there's any dosage effect?
+```{r}
+possible_dosage <- intersect(rownames(DE_list[["WTvsNULL"]]), rownames(DE_list[["WTvsHET"]]))
+
+a <- merge(null.df[possible_dosage, c("gene","fdr","logfc")], het.df[possible_dosage, c("gene","fdr","logfc")], by = "gene")
+colnames(a) <- c("gene","fdr_null","logFC_null","fdr_het","logfc_het")
+a$diff <- a$logFC_null - a$logfc_het
+
+head(a[order(abs(a$diff), decreasing = T), ], n=20)
+```
+
+
+```{r, echo=F,  fig.width=10, fig.height=10, message=F, warning=F}
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3),]$group = "keep"
+experiment.aggregate <- SubsetData(experiment.aggregate, cells.use = rownames(
+  experiment.aggregate@meta.data[experiment.aggregate@meta.data$group == "keep",]), do.clean = T)
+
+genes_of_interest = head(a[order(abs(a$diff), decreasing = T), "gene"], n=10)
+marrangeGrob(grobs=amanda.plot.genes(genes_of_interest), nrow=2, ncol=1) #Looks good to me
+```
+
+#### That Nrgn plot looks pretty convincing to me. 
+
+
+
+### GO enrichment 
+- background will be those we didn't remove for filtering so N = 7174
+
+```{r, include=F}
+
+runGO <- function(output_file, backgroundGenes, DEgenes){
+  genes <- as.integer(backgroundGenes %in% DEgenes) # make vector for analysis that contains all genes (1 for DEX, 0 for not)
+  names(genes) <- (backgroundGenes)
+  cat(table(genes), "\n")
+
+  pwf=nullp(genes,"mm10","geneSymbol") #obtain a weighting for each gene, depending on its length
+  GO.wall=goseq(pwf,"mm10","geneSymbol")
+  enriched.GO <- GO.wall[p.adjust(GO.wall$over_represented_pvalue, method="BH") < 0.05, ] #apply FDR correction
+  dim(enriched.GO)
+
+  enriched.GO$Genes <- ""
+  for (i in enriched.GO$category){
+    GOgenes <- unlist(mget(unique(get(i, org.Mm.egGO2ALLEGS)), org.Mm.egSYMBOL))
+    enriched.GO$Genes[enriched.GO$category ==i] <- paste0(DEgenes[DEgenes %in% GOgenes], collapse=", ")
+  }
+  write.csv(enriched.GO, output_file)
+  return(enriched.GO)
+}
+
+
+amanda.bar.plot <- function(GO.df, my.title){
+  df <- head(GO.df[,c("term","over_represented_pvalue")], n=15)
+  df$log10pval <- -log10(df$over_represented_pvalue)
+  df <- df[order(df$log10pval, decreasing = T), ]
+  
+  g1 <- ggplot(data=df, aes(x=reorder(term, log10pval), y=log10pval)) +
+    geom_bar(stat="identity") + 
+    ylab("-log10(pval)") + 
+    xlab("") +
+    ggtitle(my.title) +
+    coord_flip()
+return(g1)
+}
+
+```
+
+```{r, warning=F, message=F, echo=F,  fig.width=10, fig.height=10}
+GO_null <- runGO(output_file = paste0(out_dir, "/NULL_GO.csv"), 
+                backgroundGenes = rownames(full_list[[1]]),
+                DEgenes = rownames(DE_list[["WTvsNULL"]]))
+amanda.bar.plot(GO_null, "NULL top 20 GO terms")
+
+GO_het <- runGO(output_file = paste0(out_dir, "/HET_GO.csv"), 
+                backgroundGenes = rownames(full_list[[1]]),
+                DEgenes = rownames(DE_list[["WTvsHET"]]))
+amanda.bar.plot(GO_het, "HET top 20 GO terms")
+
+GO_intersection <- runGO(output_file = paste0(out_dir, "/intersection_GO.csv"), 
+                backgroundGenes = rownames(full_list[[1]]),
+                DEgenes = intersect(rownames(DE_list[["WTvsHET"]]), rownames(DE_list[["WTvsNULL"]])))
+amanda.bar.plot(GO_intersection, "Intersection top 20 GO terms")
+```
+
+
+
+#### Another way to visualize the fold changes + go enrichment
+```{r, echo = F}
+process_of_interest <- c("axon","neuron part","generation of neurons","synapse","neurogenesis","neuron differentiation","neuron projection")
+
+#HET
+enriched.GO <- GO_null
+a<- DE_list[["WTvsNULL"]]
+df <- data.frame(Term = enriched.GO$term)
+for (i in a$gene){
+  for (j in df$Term){
+    if (i %in% strsplit(enriched.GO[enriched.GO$term==j, "Genes"],", ")[[1]]){
+      val <- a[a$gene == i, "logfc"]
+      df[df$Term == j, i] <- val}
+    else(df[df$Term == j, i] <- 0)
+  }
+}
+
+df <- df[,!colSums(is.na(df)) > 0,] #remove any columns with missing values
+#df <- df[, (colSums(df != 0) > 4)]
+df2 <- melt(df)
+colnames(df2) <- c("GO.Term", "Gene","Log2FC")
+df3 <- df2[df2$GO.Term %in% process_of_interest, ]
+
+ggplot(data=df3,aes(x=Gene,y=GO.Term,fill=Log2FC))+
+    geom_tile(colour = "white") +
+    scale_fill_gradient2(low="blue",high='red',mid="white")+
+    theme_bw() + xlab("Genes") +
+    theme(axis.text.x=element_blank())+
+    #theme(axis.text.x=element_text(angle=60,vjust=0.4))+
+    labs(title="Genes in each GO category colored by Log2FC--NULL") +
+    NULL
+
+```
+
+
+```{r}
+sessionInfo()
+```
+

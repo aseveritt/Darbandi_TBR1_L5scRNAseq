@@ -1,0 +1,427 @@
+---
+title: "Investigate Clustering Further"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+__Author:__ Amanda Everitt  
+__Began:__ 8/24/2018  
+__Finished:__: 8/25/2018  
+
+###[Goal] 
+Investigate the clustering of neuronal cells in particular and Tbr1+ neuronal cells without the background noise of the other cellular subtypes. 
+First, lets look at clustering of neuronal cells and see if it as homogenous as the first tSNE makes it appear. Next lets see if this pattern is retained in cells noticeably expressing Tbr1 transcripts.
+
+```{r, include=FALSE}
+rm(list=ls())
+suppressPackageStartupMessages({
+    library(knitr)
+    library(Seurat)
+    library(dplyr)
+    library(SingleCellExperiment)
+    library(dynamicTreeCut)
+    library(cluster)
+    library(scales)
+    library(reshape2)
+    library(gridExtra)
+})
+
+wd <- "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/scripts"
+out_dir = "outputs/output_03"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# [Neuronal Cells]
+### Step 1: Load Data for "Neuronal cells" (Cluster 0,1,2)
+- only neuronal cells (Cluster 0,1,2) and using the raw data. 
+```{r}
+load(file=paste0(wd, "/outputs/output_02/experiment_aggregate.0.3.RData"))
+neuronal_cells <- rownames(experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0,1,2),])
+experiment.aggregate <- SubsetData(experiment.aggregate.0.3, cells.use = neuronal_cells, do.clean = T)
+experiment.aggregate
+```
+
+### Step 2: Remove cells with extreme values of genes/umi for this subset
+```{r}
+p1a <- ggplot(experiment.aggregate@meta.data, aes(x=nUMI)) + 
+  geom_histogram(binwidth=50, color="black", fill="white") + ggtitle("Distribution of nUMI") +
+  geom_vline(aes(xintercept=4000),color="red") + theme_bw()
+p1b <- VlnPlot(experiment.aggregate, "nUMI", do.return = TRUE, group.by = "orig.ident") + 
+  geom_hline(yintercept = 4000, color= "red")
+p1b <- p1b + ggtitle("Distribution of nUMI by genotype") + xlab("Genotype") + ylab("count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+p2a <- ggplot(experiment.aggregate@meta.data, aes(x=nGene)) + 
+  geom_histogram(binwidth=50, color="black", fill="white") + ggtitle("Distribution of nGene") +
+  geom_vline(aes(xintercept=500),color="red") + geom_vline(aes(xintercept=1700),color="red") + theme_bw()
+p2b <- VlnPlot(experiment.aggregate, "nGene", do.return = TRUE, group.by = "orig.ident") +
+  geom_hline(yintercept = 1700, color= "red")
+p2b <- p2b + ggtitle("Distribution of nGene by genotype") + xlab("Genotype") + ylab("count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+p3a <- ggplot(experiment.aggregate@meta.data, aes(x=percent.mito)) + 
+  geom_histogram(binwidth=0.01, color="black", fill="white") + ggtitle("Distribution of mito percentage") +
+  geom_vline(aes(xintercept=0.3),color="red") + theme_bw()
+p3b <- VlnPlot(experiment.aggregate, "percent.mito", do.return = TRUE, group.by = "orig.ident") +
+  geom_hline(yintercept = 0.299, color= "red")
+p3b <- p3b + ggtitle("Distribution of mito % by genotype") + xlab("Genotype") + ylab("count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+grid.arrange(p1a,p2a, p3a, p1b, p2b, p3b, ncol=3)
+```
+
+```{r}
+experiment.aggregate <- FilterCells(object = experiment.aggregate, subset.names = "nGene", 
+                                    low.thresholds = 500 , high.thresholds = 1700)
+experiment.aggregate <- FilterCells(object = experiment.aggregate, subset.names = "nUMI", 
+                                    low.thresholds = -Inf , high.thresholds = 4000)
+experiment.aggregate
+```
+
+### Step 3: Remove genes that are non-informative/not well represented/not variable
+- Removing  mitochondrial, ribosomal, or psuedogenes
+- Removing genes that don't occur in 1% of cells (~12)
+- Removing genes with variation below median variation across all genes
+```{r}
+counts = as.matrix(experiment.aggregate@raw.data[, colnames(experiment.aggregate@data)])  #Extract Raw Data
+
+means <- rowMeans(as.matrix(experiment.aggregate@data))
+vars <- rowVars(as.matrix(experiment.aggregate@data))
+rData = data.frame(seuratVarGenes = rownames(counts) %in% experiment.aggregate.0.3@var.genes,
+                   NumberCellsOccurIn = as.numeric(rowSums(as.matrix(experiment.aggregate@data) > 0)),
+                   MeanExpr = as.numeric(means), 
+                   Var = as.numeric(vars),
+                   CoefofVar = vars/means^2
+                   )
+rownames(rData) = rownames(counts)
+```
+
+```{r}
+#Remove mitochondrial, ribosomal, or psuedogenes
+pt1 <- grep("^mt-|^Rps|^Rpl|^Mrps|^Mrpl|^Gm", rownames(rData), value = T)
+
+#Remove genes that don't occur in 1% of cells (~12)
+pt2 <- rownames(rData[rData$NumberCellsOccurIn < 12,])
+
+#Remove genes with variation below minimum
+pt3 <- rownames(rData[rData$Var < median(rData$Var),])
+to.remove <- c(pt1, pt2, pt3)
+
+#Update the objects
+rData <- rData[!rownames(rData) %in% to.remove, ]
+counts <- counts[rownames(rData),]
+
+#Optional plotting
+#hist(rData$NumberCellsOccurIn, breaks = 50)
+#hist(rData$Var, breaks = 50)
+```
+
+### Step 4: Load data into Seurat for visualization
+```{r}
+load(paste0(wd, "/", out_dir, "/neuronal_object.RData"))
+```
+
+```{r, eval=F}
+experiment.aggregate <- CreateSeuratObject(counts, project = "neuronal cells")
+experiment.aggregate@meta.data$orig.ident = gsub(".*L5|/", "", rownames(experiment.aggregate@meta.data))
+experiment.aggregate <- NormalizeData(object= experiment.aggregate, normalization.method = "LogNormalize", scale.factor = 10000)
+experiment.aggregate <- ScaleData(
+  object = experiment.aggregate, #will populate new slot "scale data", does not change "data" slot
+  do.scale = TRUE,
+  do.center = TRUE, 
+  vars.to.regress = c("nUMI", "nGene")) 
+
+experiment.aggregate <- RunPCA(
+  object = experiment.aggregate,
+  pc.genes = rownames(experiment.aggregate@data), #use all genes
+  pcs.compute = 20, do.print = F,
+  maxit = 500)
+
+experiment.aggregate <- JackStraw(
+    object = experiment.aggregate, 
+    num.replicate = 100, 
+    num.pc = 20)
+
+use.pcs = c(1:8)  #Chose all PCs accounting for more than 2% of variance
+experiment.aggregate <- FindClusters(
+    object = experiment.aggregate, 
+    reduction.type = "pca", 
+    dims.use = use.pcs, 
+    resolution = seq(0.3,1.2,0.3), 
+    print.output = FALSE, 
+    force.recalc = TRUE,
+    save.SNN = TRUE
+)
+
+experiment.aggregate <- SetAllIdent(experiment.aggregate, id = "res.0.3")
+experiment.aggregate <- RunTSNE( object = experiment.aggregate, reduction.use = "pca", dims.use = use.pcs, do.fast = TRUE)
+experiment.aggregate <- BuildClusterTree(experiment.aggregate, pcs.use = use.pcs, do.reorder = F, reorder.numeric = F, do.plot=F)
+save(experiment.aggregate, file=paste0(wd, "/", out_dir, "neuronal_object.RData"))
+```
+
+```{r, echo=F}
+PCAPlot(object = experiment.aggregate, dim.1 = 1, dim.2 = 2, group.by = "orig.ident")
+```
+
+```{r, echo=F}
+percentVar <- experiment.aggregate@dr$pca@sdev^2/sum(experiment.aggregate@dr$pca@sdev^2)*100
+d<- as.data.frame(percentVar)
+d$PC <- as.factor(paste0("PC",rownames(d)))
+positions <- d$PC
+p<-ggplot(data=d, aes(x=PC, y=percentVar)) +
+  geom_bar(stat="identity",fill="steelblue") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") +
+  xlab("Principle Component") + 
+  ylab("Variance Explained (%)") +
+  scale_x_discrete(limits = positions)+
+  scale_y_continuous(breaks = seq(0, 20, by = 1))+
+  geom_hline(yintercept=4, col="red")
+p
+```
+
+```{r, echo=F}
+TSNEPlot(object = experiment.aggregate, group.by="orig.ident", pt.size=0.5)
+```
+
+```{r, echo=F}
+TSNEPlot(object = experiment.aggregate, do.label = T, pt.size=0.5)
+FeaturePlot(experiment.aggregate, features.plot = c("Mgst3", "Foxp1", "Bcl11b"), cols.use = c("lightblue", "red"), nCol = 3, no.legend = F, do.return = T)
+```
+
+```{r, echo=F, fig.height=10 ,fig.width=10}
+use.pcs = c(1:8)
+#Silhoutte Lengths-- how close is this clustering?
+pcas <- experiment.aggregate@dr$pca@cell.embeddings[, use.pcs]
+my.dist <- dist(pcas)
+my.clusters <- as.numeric(as.factor(experiment.aggregate@meta.data$res.0.3))
+
+clust.col <- hue_pal()(13)
+sil <- silhouette(my.clusters, dist = my.dist)
+sil.cols <- clust.col[ifelse(sil[,3] > 0, sil[,1], sil[,2])]
+sil.cols <- sil.cols[order(-sil[,1], sil[,3])]
+plot(sil, main = paste(length(unique(my.clusters)), "clusters"), 
+    border=sil.cols, col=sil.cols, do.col.sort=FALSE)
+```
+
+
+### Step 4: Use Seurat to get a quick idea of what genes could be driving the seperation of cluster 3,4, and 5
+```{r, eval=F}
+cluster3 <- FindMarkers(object = experiment.aggregate, ident.1 = 3, ident.2 = c(0:2), min.pct = 0,  test.use = "wilcox")
+markers_all <- FindAllMarkers(object = experiment.aggregate, min.pct = 0, thresh.use = 0, only.pos = TRUE, test.use = "wilcox")
+
+save(list = c("cluster3", "markers_all"), file=paste0(wd, "/", out_dir, "/neuronal_markers.RData"))
+```
+```{r}
+load(paste0(wd, "/", out_dir, "/neuronal_markers.RData"))
+top10_FC <- as.data.frame(markers_all[abs(markers_all$p_val_adj) < 0.05, ] %>% group_by(cluster) %>% top_n(10, avg_logFC))
+top10_cluster3 <- as.data.frame(markers_all[abs(markers_all$p_val_adj) < 0.05, ] %>% group_by(cluster) %>% top_n(10, avg_logFC))
+```
+
+####Cluster 4
+```{r}
+top10_FC[top10_FC$cluster == 4,]
+FeaturePlot(experiment.aggregate, features.plot = c("Arpp21","Rbp1","Rxrg","Bcl11b"), cols.use = c("lightblue", "red"), nCol = 2, no.legend = F)
+```
+
+#### Looks like cluster 4 could be another sub-type. Do any of these genes look like anything in particular to you both?
+
+
+####Cluster 5
+```{r}
+top10_FC[top10_FC$cluster == 5,]
+FeaturePlot(experiment.aggregate, features.plot = c("Xist", "Ogt", "Meg3", "Malat1"), cols.use = c("lightblue", "red"), nCol = 2, no.legend = F)
+```
+
+#### Looks like cluster 5 is mainly X-linked genes
+
+
+####Cluster 3
+```{r}
+head(cluster3[order(abs(cluster3$avg_logFC), decreasing = T), ], n=15)
+FeaturePlot(experiment.aggregate, features.plot = c("Ptgds","Ubc", "Calm2","Cldn5"), cols.use = c("lightblue", "red"), nCol = 2, no.legend = F)
+```
+
+- Preliminary looks like Ptgds and Ubc are upregulated in WT whereas Calm2 and Cldn5 are downregulated
+- Will follow this up with more thorough DEX
+
+
+
+
+
+
+# [Tbr1+ Neuronal Cells]
+```{r, include=F}
+rm(list=ls())
+wd <- "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/scripts"
+out_dir = "outputs/output_03"
+```
+
+
+### Step 1: Load Data for "Tbr1+ Neuronal cells" (Cluster 0,1,2)
+- only neuronal cells (Cluster 0,1,2) which have a non-zero count for Tbr1 (using the raw data)
+```{r}
+load(paste0(wd, "/outputs/output_02/experiment_aggregate.0.3.RData"))
+neuronal_cells <- rownames(experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0,1,2),])
+experiment.aggregate <- SubsetData(experiment.aggregate.0.3, cells.use = neuronal_cells, do.clean = T)
+experiment.aggregate
+
+a <- melt(experiment.aggregate@data["Tbr1",])
+a$sample_type <- "WT"
+a[grep("NULL", rownames(a)),]$sample_type <- "NULL"
+a[grep("HET", rownames(a)),]$sample_type <- "HET"
+p1 <- ggplot(a, aes(x=value, fill=sample_type)) + 
+      geom_density(alpha= 0.3) +
+      scale_x_continuous(name="Normalized counts per cell") +
+      ylim(0,0.5) + ylab("Density") +
+      ggtitle("Density of Tbr1 expression")
+tbr1.cells.keep <- rownames(a[a$value > 0, , drop=F])
+p1
+experiment.aggregate <- SubsetData(experiment.aggregate, cells.use = tbr1.cells.keep, do.clean = T)
+experiment.aggregate
+```
+
+### Step 2: Remove cells with extreme values of genes/umi for this subset
+```{r}
+hist(experiment.aggregate@meta.data$nGene, breaks = 100);abline(v = c(500,1700), col="red")
+experiment.aggregate <- FilterCells(object = experiment.aggregate, subset.names = "nGene", 
+                                    low.thresholds = 500 , high.thresholds = 1700)
+experiment.aggregate
+
+hist(experiment.aggregate@meta.data$nUMI, breaks = 100);abline(v=4000, col="red")
+experiment.aggregate <- FilterCells(object = experiment.aggregate, subset.names = "nUMI", 
+                                    low.thresholds = -Inf , high.thresholds = 4000)
+experiment.aggregate
+```
+
+### Step 3: Remove genes that are non-informative/not well represented/not variable
+- Removing  mitochondrial, ribosomal, or psuedogenes
+- Removing genes that don't occur in 1% of cells (~12)
+- Removing genes with variation below median variation across all genes
+```{r}
+counts = as.matrix(experiment.aggregate@raw.data[, colnames(experiment.aggregate@data)])  #Extract Raw Data
+
+means <- rowMeans(as.matrix(experiment.aggregate@data))
+vars <- rowVars(as.matrix(experiment.aggregate@data))
+rData = data.frame(seuratVarGenes = rownames(counts) %in% experiment.aggregate.0.3@var.genes,
+                   NumberCellsOccurIn = as.numeric(rowSums(as.matrix(experiment.aggregate@data) > 0)),
+                   MeanExpr = as.numeric(means), 
+                   Var = as.numeric(vars),
+                   CoefofVar = vars/means^2
+                   )
+rownames(rData) = rownames(counts)
+```
+
+```{r}
+#Remove mitochondrial, ribosomal, or psuedogenes
+pt1 <- grep("^mt-|^Rps|^Rpl|^Mrps|^Mrpl|^Gm", rownames(rData), value = T)
+
+#Remove genes that don't occur in 1% of cells (~12)
+pt2 <- rownames(rData[rData$NumberCellsOccurIn < 5,])
+
+#Remove genes with variation below minimum
+pt3 <- rownames(rData[rData$Var < median(rData$Var),])
+to.remove <- c(pt1, pt2, pt3)
+
+#Update the objects
+rData <- rData[!rownames(rData) %in% to.remove, ]
+counts <- counts[rownames(rData),]
+
+#Optional plotting
+#hist(rData$NumberCellsOccurIn, breaks = 50)
+#hist(rData$Var, breaks = 50)
+```
+
+### Step 4: Load data into Seurat for visualization
+```{r}
+load(paste0(wd, "/", out_dir, "/Tbr1_neuronal_object.RData"))
+```
+
+```{r, eval=F}
+experiment.aggregate <- CreateSeuratObject(counts, project = "Tbr1+_neuronal_cells")
+experiment.aggregate@meta.data$orig.ident = gsub(".*L5|/", "", rownames(experiment.aggregate@meta.data))
+experiment.aggregate <- NormalizeData(object= experiment.aggregate, normalization.method = "LogNormalize", scale.factor = 10000)
+experiment.aggregate <- ScaleData(
+  object = experiment.aggregate, #will populate new slot "scale data", does not change "data" slot
+  do.scale = TRUE,
+  do.center = TRUE, 
+  vars.to.regress = c("nUMI", "nGene")) 
+
+experiment.aggregate <- RunPCA(
+  object = experiment.aggregate,
+  pc.genes = rownames(experiment.aggregate@data), #use all genes
+  pcs.compute = 12, do.print = F,
+  maxit = 500)
+
+experiment.aggregate <- JackStraw(
+    object = experiment.aggregate, 
+    num.replicate = 100, 
+    num.pc = 12)
+
+use.pcs = c(1:7)  #Chose all PCs accounting for more than 5% of variance
+experiment.aggregate <- FindClusters(
+    object = experiment.aggregate, 
+    reduction.type = "pca", 
+    dims.use = use.pcs, 
+    resolution = seq(0.3,1.2,0.3), 
+    print.output = FALSE, 
+    force.recalc = TRUE,
+    save.SNN = TRUE
+)
+
+experiment.aggregate <- SetAllIdent(experiment.aggregate, id = "res.0.3")
+experiment.aggregate <- RunTSNE( object = experiment.aggregate, reduction.use = "pca", dims.use = use.pcs, do.fast = TRUE)
+save(experiment.aggregate, file=paste0(out_dir, "/Tbr1_neuronal_object.RData"))
+```
+
+```{r, echo=F}
+PCAPlot(object = experiment.aggregate, dim.1 = 1, dim.2 = 2, group.by = "orig.ident")
+```
+
+```{r, echo=F}
+percentVar <- experiment.aggregate@dr$pca@sdev^2/sum(experiment.aggregate@dr$pca@sdev^2)*100
+d<- as.data.frame(percentVar)
+d$PC <- as.factor(paste0("PC",rownames(d)))
+positions <- d$PC
+p<-ggplot(data=d, aes(x=PC, y=percentVar)) +
+  geom_bar(stat="identity",fill="steelblue") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") +
+  xlab("Principle Component") + 
+  ylab("Variance Explained (%)") +
+  scale_x_discrete(limits = positions)+
+  scale_y_continuous(breaks = seq(0, 20, by = 1))+
+  geom_hline(yintercept=8, col="red")
+p
+```
+
+```{r, echo=F}
+TSNEPlot(object = experiment.aggregate, group.by="orig.ident", pt.size=2.5)
+```
+
+```{r, echo=F}
+TSNEPlot(object = experiment.aggregate, do.label = F, pt.size=2.5)
+```
+
+
+
+
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+

@@ -1,0 +1,620 @@
+---
+title: "Compare Methods for Differential Expression"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+__Author:__ Amanda Everitt  
+__Began:__ 8/25/2018  
+__Finished:__: 8/27/2018 
+
+###[Motivation] 
+- Given there is no agreed upon software for DEX in scRNAseq data and this often fluctuates with data quality itself, we would like to try multiple platforms to see which performs best for our data. 
+- Rather than run each platform with the full dataset, I am going to run the DEX comparison on a subset of cells (the neuronal cells = cluster 0,1,2) which are fairly homogenous so that I expect the mode of adjusted pvalues to be around 0 or uniform.
+
+###[Packages Used]
+- [edgeR](https://bioconductor.org/packages/release/bioc/html/edgeR.html)
+- [limmavoom](https://www.bioconductor.org/packages/release/bioc/vignettes/limma/inst/doc/usersguide.pdf)
+- [Monocle2](http://cole-trapnell-lab.github.io/monocle-release/)
+- [MAST](https://bioconductor.org/packages/release/bioc/html/MAST.html)
+- [ROTS](https://bioconductor.org/packages/release/bioc/vignettes/ROTS/inst/doc/ROTS.pdf)
+- [Seurat](https://satijalab.org/seurat/)
+
+
+```{r, include=FALSE}
+rm(list=ls())
+suppressPackageStartupMessages({
+    library(knitr)
+    library(Seurat)
+    library(matrixStats)
+    library(SingleCellExperiment)
+})
+wd <- "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/scripts"
+
+opts_knit$set(root.dir = wd)
+out_dir = "outputs/output_04"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(paste0(out_dir, "/programs"), recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+load(file=paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:2),]$group = "group1"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 == 3 ,]$group = "group2"
+TSNEPlot(object = experiment.aggregate, group.by="orig.ident", pt.size=0.5)
+TSNEPlot(object = experiment.aggregate, group.by="group", pt.size=0.5, colors.use = c("red","blue","grey"))
+```
+
+```{r, eval=F}
+identified_cells <- rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$group %in% c("group1","group2"),])
+experiment.aggregate <- SubsetData(experiment.aggregate, cells.use = identified_cells, do.clean = T)
+
+counts = as.matrix(experiment.aggregate@raw.data[, colnames(experiment.aggregate@data)])
+norm_counts = as.matrix(experiment.aggregate@data)
+cData = data.frame(nGene = as.integer(experiment.aggregate@meta.data$nGene),
+                   nUMI = as.integer(experiment.aggregate@meta.data$nUMI),
+                   GT = gsub(".*L5|/", "", rownames(experiment.aggregate@meta.data)),
+                   group = experiment.aggregate@meta.data$group
+                   )
+rownames(cData) = colnames(counts)
+
+#Row Data
+means <- rowMeans(as.matrix(experiment.aggregate@data))
+vars <- rowVars(as.matrix(experiment.aggregate@data))
+rData = data.frame(NumberCellsOccurIn = as.numeric(rowSums(as.matrix(experiment.aggregate@data) > 0)),
+                   MeanExpr = as.numeric(means), 
+                   Var = as.numeric(vars),
+                   CoefofVar = vars/means^2
+                   )
+rownames(rData) = rownames(counts)
+core = SingleCellExperiment(assays = list(counts = counts), colData = cData, rowData = rData)
+core_norm = SingleCellExperiment(assays = list(counts = norm_counts), colData = cData, rowData = rData)
+
+#not evaluating here so file isn't constantly overwritten
+save(core, file=paste0(out_dir, "/SC_core.RData"))
+save(core_norm, file=paste0(out_dir, "/SC_core_norm.RData"))
+```
+
+
+*****************************************************************************
+
+# Step 3: Move to aws cluster
+- m4.10xlarge -- Amazon Linux AMI 2018.03.0 (HVM), SSD Volume Type - ami-0ff8a91507f77f867 64bit
+- added 50GB extra EBS volume
+- add incoming port 8787
+- Add following script in "Advanced settings"
+
+```{}
+#!/bin/bash
+#install R
+yum -y remove gcc72-c++.x86_64 libgcc72.x86_64
+yum -y install gcc-gfortran.noarch
+yum-builddep -y R
+yum -y install gcc-c++
+yum -y install curl-devel
+yum -y install libxml2-devel
+yum -y install gsl-devel
+yum -y install openssl-devel
+yum -y install libpng-devel
+yum -y install java-1.8.0-openjdk-src.x86_64
+ln -s /usr/lib/gcc/x86_64-amazon-linux/6.4.1/libquadmath.so /usr/lib/libquadmath.so
+ln -s /usr/lib/gcc/x86_64-amazon-linux/6.4.1/libgfortran.so /usr/lib/libgfortran.so
+yum -y install git
+
+wget https://cran.r-project.org/src/base/R-3/R-3.5.1.tar.gz
+tar -xzf R-3.5.1.tar.gz
+rm -rf R-3.5.1.tar.gz
+mkdir /progs
+cd R-3.5.1/
+./configure --prefix=/progs/3.5.1 --enable-R-shlib
+make
+make install
+cd
+ln -s /progs/3.5.1/bin/R /usr/bin/
+
+#install RStudio-Server 1.0
+wget https://download2.rstudio.org/rstudio-server-rhel-1.0.153-x86_64.rpm
+yum install -y --nogpgcheck rstudio-server-rhel-1.0.153-x86_64.rpm
+rm -rf rstudio-server-rhel-1.0.153-x86_64.rpm
+```
+
+- after ssh into instance 
+
+```{}
+sudo su
+rstudio-server verify-installation
+adduser r_user
+passwd r_user #follow prompts
+rstudio-server start
+#Install notebook packages as you wait for below to finish bc that will take awhile
+
+install.packages("BiocManager")
+BiocManager::install(version = '3.8')
+BiocManager::install("zinbwave")
+BiocManager::install("DESeq2")
+BiocManager::install(c("dplyr", "doParallel", "MAST"))
+
+#FYI Seurat won't load bc dependency hdf5r can't load. yum install not available for this version and I don't feel like doing it from source -- will just do seurat part on local
+```
+
+
+# Step 4: Try Multiple Methods
+## Seurat
+```{r, eval=F}
+runSeurat <- function(out_dir, my.method) {
+  suppressPackageStartupMessages(require(Seurat))
+  
+  load(file=paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+  experiment.aggregate@meta.data$group = "removed"
+  experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:2),]$group = "group1"
+  experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 == 3 ,]$group = "group2"
+  experiment.aggregate <- SetAllIdent(experiment.aggregate, id = "group")
+  
+  group1.v.group2 <- FindMarkers(object = experiment.aggregate,
+                             ident.1 = "group1",
+                             ident.2 = "group2",
+                             logfc.threshold = 0,
+                             genes.use = rownames(experiment.aggregate@raw.data), #ALL data
+                             thresh.use = 0, test.use = my.method,
+                             min.pct = 0, random.seed = 1,
+                             max.cells.per.ident = Inf)
+  group1.v.group2$method = 'seurat'
+  group1.v.group2$gene <- rownames(group1.v.group2)
+  group1.v.group2 = group1.v.group2[, c('gene', 'p_val', 'p_val_adj', 'avg_logFC', 'method')]
+  colnames(group1.v.group2) = c("gene", "pval", "padj", "logfc", "method") #make column names consistent across all
+  write.table(group1.v.group2, file=paste0(out_dir, "/seurat_", my.method,".csv"))
+}
+
+runSeurat(out_dir= paste0(out_dir,"/programs/"), my.method="wilcox")
+runSeurat(out_dir= paste0(out_dir,"/programs/"), my.method="negbinom")
+```
+
+
+
+## edgeR
+```{r, eval=F}
+#wants raw data
+fit_edgeR <- function(counts, design, filter = NULL){
+  suppressPackageStartupMessages(library(edgeR))
+  d = DGEList(counts)
+  d = suppressWarnings(calcNormFactors(d)) #Normalize by Effective library size
+  d = estimateDisp(d, design) #will take awhile
+  jpeg("EdgeR_bcv.jpeg")
+  plotBCV(d, cex.main=0.8,main = paste("Estimated biological common sq-rt-dispersion is:",
+                     round(sqrt(d$common.dispersion), digits=2) ,
+                     "\n(should be below 0.4 for human datasets arising from well-controlled experiments)"))
+  dev.off()
+  fit = glmFit(d, design)
+  head(fit$coefficients)
+  glm_1v2 <- glmLRT(fit, coef="colData(core)$groupgroup2") #Preform likelihood ratio tests between full and reduced models
+  summary(decideTests(glm_1v2))
+  
+  tab_1v2 = glm_1v2$table
+  tab_1v2$padj = p.adjust(tab_1v2$PValue, "BH")
+  tab_1v2$gene = rownames(tab_1v2)
+  de_1v2 <- as.data.frame(tab_1v2, stringsAsFactors = FALSE)
+  de_1v2 = de_1v2[, c('gene', 'PValue', 'padj', 'logFC')] #rearrange
+  colnames(de_1v2) = c('gene', 'pval', 'padj', 'logfc') #relabel
+  de_1v2$method <- 'edgeR'
+  
+  write.table(de_1v2, file="edgeR.csv")
+}
+
+load("/home/r_user/SC_core.RData")
+colData(core)$group <- relevel(colData(core)$group, ref = "group1")
+fit_edgeR(assay(core), model.matrix(~colData(core)$group))
+```
+```{r}
+knitr::include_graphics(paste0(out_dir, '/programs/EdgeR_bcv.jpeg'))
+```
+
+
+## limma-voom
+```{r, eval=F}
+#wants raw data
+runLimmavoom <- function(counts, design) {
+  suppressPackageStartupMessages(library(limma))
+  suppressPackageStartupMessages(library(edgeR))
+  dgel <- DGEList(counts)
+  dgel <- edgeR::calcNormFactors(dgel) #Use norm factors from edgeR
+  v <- voom(dgel,design,plot=FALSE)
+  fit <- lmFit(v,design)
+  fit <- eBayes(fit)
+  tt_1v2 <- topTable(fit,coef="colData(core)$groupgroup2",n=nrow(dgel),sort.by="none")
+  padj_1v2 <- p.adjust(tt_1v2$P.Value,method="BH")
+  padj_1v2[is.na(padj_1v2)] <- 1
+  voom_1v2 <- data.frame(gene = rownames(tt_1v2), pval=tt_1v2$P.Value, padj=padj_1v2, logfc=tt_1v2$logFC, method = "limmavoom")
+  write.table(voom_1v2, file="voom.csv")
+}
+
+load("/home/r_user/SC_core.RData")
+colData(core)$group <- relevel(colData(core)$group, ref = "group1")
+runLimmavoom(assay(core), model.matrix(~colData(core)$group))
+```
+
+
+## Monocle2
+```{r, eval=F}
+#wants raw data
+run_Monocle <- function(cData, rData, counts){
+  suppressPackageStartupMessages(library("monocle"))
+
+  #Requires CellDataSet object and un-normalized counts
+  #cData$GT <- relevel(cData$GT, ref = "WT")
+  pd <- new("AnnotatedDataFrame", data = cData)
+  fd <- new("AnnotatedDataFrame", data = rData)
+  fd$gene_short_name <- rownames(fd)
+  HSMM <- newCellDataSet(as(counts, "sparseMatrix"),
+                       phenoData = pd, 
+                       featureData = fd, 
+                       expressionFamily=negbinomial.size())
+  HSMM <- estimateSizeFactors(HSMM)
+  HSMM <- estimateDispersions(HSMM)
+  res_1v2 <- differentialGeneTest(HSMM, verbose=T, cores=10, 
+                                 fullModelFormulaStr = "~group"
+                                 )
+  res_1v2 <- res_1v2[, c("pval","qval","gene_short_name")]
+  colnames(res_1v2) <- c("pval","padj","gene")
+  res_1v2$method <- "monocle"
+  res_1v2$logfc <- 0
+  res_1v2 <- res_1v2[, c('gene', 'pval', 'padj', 'logfc','method')]
+  write.table(res_1v2, file="monocle.csv")
+  
+  disp_table <- dispersionTable(HSMM)
+  unsup_clustering_genes <- subset(disp_table, mean_expression >= 0.1)
+  HSMM <- setOrderingFilter(HSMM, unsup_clustering_genes$gene_id)
+  jpeg("monocle2_bcv.jpeg")
+  plot_ordering_genes(HSMM)
+  dev.off()
+}
+
+load("/home/r_user/SC_core.RData")
+colData(core)$group <- relevel(colData(core)$group, ref = "group1")
+cData = data.frame(colData(core))
+rData =  data.frame(rowData(core))
+rownames(rData) = rownames(core)
+run_Monocle(cData, rData, as.matrix(assay(core)))
+```
+```{r}
+knitr::include_graphics(paste0(out_dir, '/programs/monocle2_bcv.jpeg'))
+```
+
+## MAST (w/out adaptive thresholding)
+```{r, eval=F}
+#wants tpm
+runMAST <- function(counts, design, cData) {
+  suppressPackageStartupMessages(library(MAST))
+  tpm <- counts*1e6/colSums(counts)
+  tpm <- log2(tpm+1)
+  sca <- FromMatrix(tpm,cData)
+  assays(sca) <- list(tpm=assay(sca))
+  ngeneson <- apply(counts,2,function(x) mean(x>0)) #mean of counts for each cell where gene was expressed
+  CD <- colData(sca)
+  CD$ngeneson <- ngeneson #save into a coldata copy
+  CD$cngeneson <- CD$ngeneson-mean(ngeneson) #mean of cell-mean of all cells
+  colData(sca) <- CD #add two variables to column data
+  ## differential expression
+  fit <- zlm(~ cngeneson + group, sca = sca,
+             method = "bayesglm", ebayes = TRUE) 
+  
+  summaryDt = summary(fit, doLRT='groupgroup2')
+  summaryDt = summaryDt$datatable
+  fcHurdle <- merge(summaryDt[contrast=='groupgroup2'&component=='H',.(primerid, `Pr(>Chisq)`)],
+                    summaryDt[contrast=='groupgroup2' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid')
+  
+  fcHurdle[,padj:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+  
+  df_1v2 = data.frame(gene = fcHurdle$primerid,
+             pval=fcHurdle[,'Pr(>Chisq)'], padj=fcHurdle$padj,
+             logfc=fcHurdle$coef, method="MAST")
+  colnames(df_1v2)[2] = 'pval'
+  write.table(df_1v2, file=paste0(out_dir, '/programs/MAST.csv'))
+}
+
+load("/home/r_user/SC_core.RData")
+colData(core)$group <- relevel(colData(core)$group, ref = "group1")
+runMAST(assay(core), model.matrix(~colData(core)$group), core@colData)
+```
+
+## MAST (w/ adaptive thresholding)
+```{r, eval=F}
+runMAST_thresh <- function(counts, design, cData, my.bins =20 , my.min.per.bin =30, outputfile) {
+  suppressPackageStartupMessages(library(MAST))
+  tpm <- counts*1e6/colSums(counts)
+  tpm <- log2(tpm+1)
+  sca <- FromMatrix(tpm,cData)
+  assays(sca) <- list(tpm=assay(sca))
+  ngeneson <- apply(counts,2,function(x) mean(x>0)) #mean of counts for each cell where gene was expressed
+  CD <- colData(sca)
+  CD$ngeneson <- ngeneson #save into a coldata copy
+  CD$cngeneson <- CD$ngeneson-mean(ngeneson) #mean of cell-mean of all cells
+  colData(sca) <- CD #add two variables to column data
+  
+  thres <- thresholdSCRNACountMatrix(assay(sca), conditions = sca@colData$group, nbins = my.bins, min_per_bin = my.min.per.bin)
+  assays(sca) <- list(thresh=thres$counts_threshold, tpm=assay(sca))
+  jpeg(paste0(out_dir, '/programs/Mast_thresh.jpeg'))
+  plot(thres)
+  dev.off()
+  
+  fit <- zlm(~ cngeneson + group, sca = sca,
+             method = "bayesglm", ebayes = TRUE) 
+  
+  summaryDt = summary(fit, doLRT='groupgroup2')
+  summaryDt = summaryDt$datatable
+  fcHurdle <- merge(summaryDt[contrast=='groupgroup2'&component=='H',.(primerid, `Pr(>Chisq)`)],
+                    summaryDt[contrast=='groupgroup2' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid')
+  
+  fcHurdle[,padj:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+  
+  df_1v2 = data.frame(gene = fcHurdle$primerid,
+             pval=fcHurdle[,'Pr(>Chisq)'], padj=fcHurdle$padj,
+             logfc=fcHurdle$coef, method="MAST")
+  colnames(df_1v2)[2] = 'pval'
+  write.table(df_1v2, file=outputfile)
+}
+
+load("/home/r_user/SC_core.RData")
+colData(core)$group <- relevel(colData(core)$group, ref = "group1")
+runMAST_thresh(counts = assay(core), 
+               design = model.matrix(~colData(core)$group), 
+               cData = core@colData,
+               my.bins = 40, 
+               my.min.per.bin = 10,
+               outputfile = paste0(out_dir, '/programs/MAST_thresh.csv'))
+```
+```{r}
+knitr::include_graphics(paste0(out_dir, '/programs/Mast_thresh.jpeg'))
+```
+
+## ROTS
+```{r, eval=F}
+#wants raw data
+runROTS <- function(core){
+  #BiocManager::install("ROTS")
+  suppressPackageStartupMessages(library(ROTS))
+  counts = assay(core)
+  colData(core)$group <- relevel(colData(core)$group, ref = "group1")
+  if (all.equal(colnames(counts), rownames(colData(core)))){
+    groups = as.numeric(colData(core)$group)
+    table(groups)
+  }
+  results = ROTS(data = counts, groups = groups , B = 1000 , K = 500 , seed = 1234, progress=TRUE, log=TRUE)
+  res <- data.frame(gene=names(results$logfc), pval=results$pvalue, padj=results$FDR, logfc=results$logfc, method="ROTS")
+  write.table(res, file="ROTS.csv")
+}
+
+load("/home/r_user/SC_core.RData")
+runROTS(core)
+```
+
+
+
+# Step 5: Compare Methods
+###Ultimately decided MAST was the best package based on the pvalue distribution. It was also the package with the shortest computational time; it takes ~30min to run five iterations.
+```{r, echo=F, fig.width=10, fig.height=10}
+amanda.quick.plot <- function(my.file.names){
+
+  de_list <- list()
+  de_df = data.frame()
+  for (i in my.file.names){
+    name = tools::file_path_sans_ext(basename(i))
+    tmp <- read.table(i, sep=" ", row.names = 1)
+    if (name=="MAST"){name = "MAST_no_thresholding"; tmp$method <- name}
+    if (name=="seurat_negbinom"){tmp$method <- name }
+    if (name=="seurat_wilcox"){tmp$method <- name }
+    if (name=="MAST_thresh"){name = "MAST_with_thresholding"; tmp$method <- name}
+    if (name=="voom"){name = "limmavoom"; tmp$method <- name}
+    de_df = rbind(de_df, tmp)
+    de_list[[name]]  <- tmp[tmp$pval < 0.05, ]
+  }
+
+  par(mfrow= c(3,3))
+  for (x in unique(de_df$method)){
+    if (x == "MAST_with_thresholding") {
+      hist(de_df[de_df$method == x, 'pval'], 
+           main = paste0(x, "\n# pval<0.05: ", dim(de_list[[x]])[1]), ylim = c(0, 3000),xlab = 'pval', col="blue")}
+    else(hist(de_df[de_df$method == x, 'pval'], 
+            main = paste0(x, "\n# pval<0.05: ", dim(de_list[[x]])[1]) , ylim = c(0, 3000),xlab = 'pval'))
+  }
+}
+
+amanda.quick.plot(my.file.names = list.files(path=paste0(out_dir, "/programs"), 
+                             pattern="*.csv", full.names = T))
+```
+
+- So the difference here is really due to the adaptive thresholding rather than platform. Good to know. 
+
+# Step 6: Choosing MAST (zlm) with adaptive thresholding as the most conservative measure. 
+- FYI For publication, we only use Neuronal WT vs others. 
+- Running all the DEX here, will dig into results in next script
+
+#####Comparison 1: Neuronal group 2 vs group 1
+#####Comparison 2: Neuronal WT vs Neuronal NULL
+#####Comparison 3: Neuronal WT vs Neuronal HET
+#####Comparison 4: Tbr1+ Neuronal WT vs Tbr1+ Neuronal NULL
+#####Comparison 5: Tbr1+ Neuronal WT vs Tbr1+ Neuronal HET
+
+```{r, include=F}
+runMAST_thresh <- function(counts, design, cData, my.bins, my.min.per.bin, ref.name, outnames) {
+  suppressPackageStartupMessages(library(MAST))
+  tpm <- counts*1e6/colSums(counts)
+  tpm <- log2(tpm+1)
+  sca <- FromMatrix(tpm, cData)
+  assays(sca) <- list(tpm=assay(sca))
+  ngeneson <- apply(counts,2,function(x) mean(x>0)) 
+  CD <- colData(sca)
+  CD$ngeneson <- ngeneson 
+  CD$cngeneson <- CD$ngeneson-mean(ngeneson) 
+  colData(sca) <- CD 
+  
+  thres <- thresholdSCRNACountMatrix(assay(sca), conditions = sca@colData$group, nbins = my.bins, min_per_bin = my.min.per.bin)
+  assays(sca) <- list(thresh=thres$counts_threshold, tpm=assay(sca))
+  pdf(paste0(out_dir, outnames, ".pdf"))
+  plot(thres)
+  dev.off()
+  
+  fit <- zlm(~ cngeneson + group, sca = sca,
+             method = "bayesglm", ebayes = TRUE) 
+  
+  summaryDt = summary(fit, doLRT=ref.name)
+  summaryDt = summaryDt$datatable
+  fcHurdle <- merge(summaryDt[contrast==ref.name &component=='H',.(primerid, `Pr(>Chisq)`)],
+                    summaryDt[contrast==ref.name & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid')
+  
+  fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+  
+  df_1v2 = data.frame(gene = fcHurdle$primerid,
+             pval=fcHurdle[,'Pr(>Chisq)'], fdr=fcHurdle$fdr,
+             logfc=fcHurdle$coef)
+  colnames(df_1v2)[2] = 'pval'
+  write.csv(df_1v2, file=paste0(out_dir, outnames, ".csv"))
+  
+  save(list=c("sca", "fit", "fcHurdle"), file=paste0(out_dir, outnames, ".RData"))
+}
+```
+
+## Comparison 1: Neuronal group 2 vs group 1
+```{r}
+load(paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:2),]$group = "group1"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 == 3 ,]$group = "group2"
+TSNEPlot(object = experiment.aggregate, group.by="group", pt.size=0.5, colors.use = c("red","blue","grey"))
+```
+
+```{r, eval=F}
+#Accidentally put the wrong reference level in above. switching here and re-saving
+comp1 <- read.table("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/output_04/programs/MAST_thresh.csv")
+comp1$logfc <- (comp1$logfc * -1)
+comp1 <- comp1[, c("gene","pval","padj","logfc")]
+colnames(comp1) <- c("gene","pval","fdr","logfc")
+write.csv(comp1, file=paste0(out_dir, "/Group2vsGroup1.csv"))
+```
+
+## Comparison 2: Neuronal WT vs Neuronal NULL
+```{r}
+load(paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "WT",]$group = "WT"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "NULL",]$group = "NULL"
+TSNEPlot(object = experiment.aggregate, group.by="group", pt.size=0.5, colors.use = c("red","grey","blue"))
+
+counts = as.matrix(experiment.aggregate@raw.data[, rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",])])
+cData = experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",]
+table(cData$group)
+```
+
+```{r, eval=F}
+if (all.equal(rownames(cData), colnames(counts))){
+  cData$group <- as.factor(cData$group)
+  cData$group <- relevel(cData$group, ref = "WT")
+  runMAST_thresh(counts, 
+               cData$group, 
+               cData,
+               my.bins = 40, 
+               my.min.per.bin = 10,
+               ref.name = "groupNULL", 
+               outnames = '/WTvsNULL')
+}
+```
+
+
+## Comparison 3: Neuronal WT vs Neuronal HET
+```{r}
+load(paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "WT",]$group = "WT"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "HET",]$group = "HET"
+TSNEPlot(object = experiment.aggregate, group.by="group", pt.size=0.5, colors.use = c("red","grey","blue"))
+
+counts = as.matrix(experiment.aggregate@raw.data[, rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",])])
+cData = experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",]
+table(cData$group)
+```
+
+```{r, eval=F}
+if (all.equal(rownames(cData), colnames(counts))){
+  cData$group <- as.factor(cData$group)
+  cData$group <- relevel(cData$group, ref = "WT")
+  runMAST_thresh(counts, 
+               cData$group, 
+               cData,
+               my.bins = 40, 
+               my.min.per.bin = 10,
+               ref.name = "groupHET", 
+               outnames = '/WTvsHET')
+}
+```
+
+## Comparison 4: Tbr1+ Neuronal WT vs Tbr1+ Neuronal NULL
+```{r}
+load(paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+experiment.aggregate@meta.data$Tbr1pos <- ifelse(experiment.aggregate@data["Tbr1",] > 0, "yes","no")
+
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "WT"
+                               & experiment.aggregate@meta.data$Tbr1pos == "yes",]$group = "WT"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "NULL"
+                               & experiment.aggregate@meta.data$Tbr1pos == "yes" ,]$group = "NULL"
+TSNEPlot(object = experiment.aggregate, group.by="group", pt.size=1.5, colors.use = c("red","grey","blue"))
+
+counts = as.matrix(experiment.aggregate@raw.data[, rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",])])
+cData = experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",]
+table(cData$group)
+```
+
+```{r, eval=F}
+if (all.equal(rownames(cData), colnames(counts))){
+  cData$group <- as.factor(cData$group)
+  cData$group <- relevel(cData$group, ref = "WT")
+  runMAST_thresh(counts, 
+               cData$group, 
+               cData,
+               my.bins = 30, 
+               my.min.per.bin = 10,
+               ref.name = "groupNULL", 
+               outnames = '/Tbr1_WTvsTbr1_NULL')
+}
+```
+
+## Comparison 5: Tbr1+ Neuronal WT vs Tbr1+ Neuronal HET
+```{r}
+load(paste0(wd, "/outputs/output_03/neuronal_object.RData"))
+experiment.aggregate@meta.data$Tbr1pos <- ifelse(experiment.aggregate@data["Tbr1",] > 0, "yes","no")
+
+experiment.aggregate@meta.data$group = "removed"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "WT"
+                               & experiment.aggregate@meta.data$Tbr1pos == "yes",]$group = "WT"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3)
+                               & experiment.aggregate@meta.data$orig.ident == "HET"
+                               & experiment.aggregate@meta.data$Tbr1pos == "yes" ,]$group = "HET"
+TSNEPlot(object = experiment.aggregate, group.by="group", pt.size=1.5, colors.use = c("red","grey","blue"))
+
+counts = as.matrix(experiment.aggregate@raw.data[, rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",])])
+cData = experiment.aggregate@meta.data[experiment.aggregate@meta.data$group != "removed",]
+table(cData$group)
+```
+
+```{r, eval=F}
+if (all.equal(rownames(cData), colnames(counts))){
+  cData$group <- as.factor(cData$group)
+  cData$group <- relevel(cData$group, ref = "WT")
+  runMAST_thresh(counts, 
+               cData$group, 
+               cData,
+               my.bins = 30, 
+               my.min.per.bin = 10,
+               ref.name = "groupHET", 
+               outnames = '/Tbr1_WTvsTbr1_HET')
+}
+```
+

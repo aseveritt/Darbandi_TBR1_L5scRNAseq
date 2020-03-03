@@ -1,0 +1,378 @@
+---
+title: "Clustering"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+__Author:__ Amanda Everitt  
+__Began:__ 8/22/2018  
+__Finished:__: 8/23/2018  
+
+###[Goal] 
+- Identify which cell types are present. We would expect most of these are neuronal. 
+
+###[Packages Used]
+- [Seurat](https://satijalab.org/seurat/)
+
+###[Results]
+- 14933 genes after filtering
+- 17396 cells after filtering
+- Data was normalized (~log(cpm)), scaled, centered, and regressed (by nUMI, nGene, %mito)
+- 12 clusters identified, 7 cell types identified
+
+
+
+Cell Type           % of cells   Cluster    Known Cell Markers              
+----------------    ----------   --------  ------------------------------  
+Neuronal              70.52%       0,1,2    Nrgn, Cnih2                       
+Interneuron           11.54%       5,6,8    Dlx1, Dlx2, Arx, Gad2             
+Astrocyte             4.98%        4        Aldh1l1, Aqp4, Gja1, Mfge8      
+Microglia             5.31%        3        Aif1, C1qa, C1qb, Ctss          
+Endothelial           3.55%        7        Cldn5, Ctla2a, Igfbp7, Kdr     
+Pericyte              2.14%        10,11    Igf2, Col1a1, Col1a2, Dcn        
+Oligodendrocyte       1.92%        9        Gpr17, Olig2, Pdgfra, Itpr2      
+----------------    ----------   --------  ------------------------------ 
+
+
+```{r, include=FALSE}
+rm(list=ls())
+suppressPackageStartupMessages({
+    library(knitr)
+    library(Seurat)
+    library(gridExtra)
+    library(grid)
+    library(dynamicTreeCut)
+    library(cluster)
+    library(scales)
+})
+wd <- "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/scripts"
+out_dir = "outputs/output_02"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+```
+#1. Load Data
+```{r}
+load(paste0(wd, "/outputs/output_01/experiment.aggregate.filtered.Rdata"))
+```
+
+```{r}
+#Normalize -> Log(CPM)
+experiment.aggregate <- NormalizeData(object= experiment.aggregate, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+#2. Exploratory look at data
+```{r}
+genes_to_plot = c("Tbr1", "Fezf2","Bcl11b","Bcl11a","Grin2b","Foxp1","Nrgn","Apoe")
+plots_list <- list()
+
+for (i in genes_to_plot){
+  a <- as.data.frame(Matrix::colSums(experiment.aggregate@data[i, , drop = FALSE]))
+  a$sample_type <- "WT"
+  a[grep("NULL", rownames(a)),]$sample_type <- "NULL"
+  a[grep("HET", rownames(a)),]$sample_type <- "HET"
+  colnames(a) <- c("count","sample_type")
+  p1<- ggplot(a, aes(x=count, fill=sample_type)) + 
+    geom_density(alpha= 0.3) +
+    scale_x_continuous(name="Normalized counts per cell") +
+    ylim(0,1) + ylab("Density") +
+    ggtitle(paste0("Density of ", i," expression"))
+  plots_list[[i]] <- p1
+}
+
+marrangeGrob(grobs=plots_list, nrow=2, ncol=2)
+```
+
+```{r}
+GenePlot( experiment.aggregate, "nUMI", "nGene", cex.use = 0.5)
+```
+
+
+#3. Identify variable genes
+```{r}
+experiment.aggregate <- FindVariableGenes(
+  object = experiment.aggregate,
+  mean.function = ExpMean,
+  dispersion.function = LogVMR,
+  x.low.cutoff = 0.125,
+  x.high.cutoff = 4,
+  y.cutoff = 0.5, do.plot=F)
+
+length(experiment.aggregate@var.genes) 
+```
+
+#4. Linear Dimensional Reduction (sequencing depth, and % mito)
+```{r}
+#Scale and Regress data on sequencing depth and % mito
+experiment.aggregate <- ScaleData(
+  object = experiment.aggregate, #will populate new slot "scale data", does not change "data" slot
+  do.scale = TRUE,
+  do.center = TRUE, 
+  vars.to.regress = c("nUMI", "nGene","percent.mito")) 
+```
+
+```{r}
+#Build PCs
+experiment.aggregate <- RunPCA(
+  object = experiment.aggregate,
+  pc.genes = experiment.aggregate@var.genes, #use variable genes
+  pcs.compute = 20, 
+  maxit = 500)
+
+PCAPlot(object = experiment.aggregate,dim.1 = 1, dim.2 = 2 )
+VizPCA(object = experiment.aggregate, pcs.use=1:2)
+```
+
+```{r}
+PCHeatmap(
+    object = experiment.aggregate, 
+    pc.use = 1:12, 
+    cells.use = 500, 
+    do.balanced = TRUE, 
+    label.columns = FALSE,
+    use.full = FALSE
+)
+```
+
+#5. Determine statistically significant PCs
+```{r, eval=F}
+experiment.aggregate <- JackStraw(
+    object = experiment.aggregate, 
+    num.replicate = 100, 
+    num.pc = 20)
+```
+```{r}
+#Too slow above so loading here instead of regenerating
+load(file=paste0(wd, "/", out_dir, "/experiment.aggregate.norm.RData"))
+```
+```{r}
+PCElbowPlot(experiment.aggregate,num.pc = 40)
+JackStrawPlot(object = experiment.aggregate, PCs = 1:40, nCol = 5)
+
+percentVar <- experiment.aggregate@dr$pca@sdev^2/sum(experiment.aggregate@dr$pca@sdev^2)*100
+d<- as.data.frame(percentVar)
+d$PC <- as.factor(paste0("PC",rownames(d)))
+positions <- d$PC
+p<-ggplot(data=d, aes(x=PC, y=percentVar)) +
+  geom_bar(stat="identity",fill="steelblue") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") +
+  #geom_text(aes(label=round(percentVar,digits = 1)), vjust=1.6, color="white", size=3.5)+
+  xlab("Principle Component") + 
+  ylab("Variance Explained (%)") +
+  scale_x_discrete(limits = positions)+
+  scale_y_continuous(breaks = seq(0, 20, by = 1))+
+  geom_hline(yintercept=2, col="red")
+p
+```
+
+
+
+```{r, eval=F}
+use.pcs = c(1:11)  #Chose all PCs accounting for more than 2% of variance
+experiment.aggregate <- FindClusters(
+    object = experiment.aggregate, 
+    reduction.type = "pca", 
+    dims.use = use.pcs, 
+    resolution = seq(0.3,1.2,0.3), 
+    print.output = FALSE, 
+    force.recalc = TRUE,
+    save.SNN = TRUE
+)
+save("experiment.aggregate", file=paste0(wd, "/", out_dir, "/experiment.aggregate.norm.RData"))
+```
+```{r}
+use.pcs = c(1:11)
+sapply(grep("^res",colnames(experiment.aggregate@meta.data),value = TRUE),
+       function(x) length(unique(experiment.aggregate@meta.data[,x])))
+```
+
+#6. Choose which resolution is best
+```{r, eval=F}
+experiment.aggregate <- SetAllIdent(experiment.aggregate, id = "res.0.3") #temporarily chose one
+experiment.aggregate <- RunTSNE( object = experiment.aggregate, reduction.use = "pca", dims.use = use.pcs, do.fast = TRUE)
+```
+```{r}
+load(file=paste0(out_dir, "/experiment_aggregate.0.3.RData"))
+```
+```{r}
+TSNEPlot(object = experiment.aggregate.0.3, group.by="res.0.3", pt.size=0.5, do.label = T)
+TSNEPlot(object = experiment.aggregate.0.3, group.by="res.0.6", pt.size=0.5, do.label = T)
+```
+
+```{r, eval=F}
+#I chose resolution 0.3 here
+experiment.aggregate.0.3 <- experiment.aggregate
+table(experiment.aggregate.0.3@ident,experiment.aggregate.0.3@meta.data$orig.ident)
+experiment.aggregate.0.3 <- BuildClusterTree(experiment.aggregate.0.3, 
+                                             pcs.use = use.pcs, do.reorder = F, 
+                                             reorder.numeric = F, do.plot=F)
+save(experiment.aggregate.0.3, file=paste0(wd, "/", out_dir, "/experiment_aggregate.0.3.RData"))
+```
+```{r}
+TSNEPlot(object = experiment.aggregate.0.3, pt.size=0.5, do.label=TRUE)
+TSNEPlot(object = experiment.aggregate.0.3, group.by="orig.ident", pt.size=0.5)
+PlotClusterTree(experiment.aggregate.0.3)
+```
+
+#7. Useful plots
+```{r, fig.height=10, fig.width=10}
+#Silhoutte Lengths-- how close is this clustering?
+pcas <- experiment.aggregate.0.3@dr$pca@cell.embeddings[, use.pcs]
+my.dist <- dist(pcas)
+my.clusters <- as.numeric(as.factor(experiment.aggregate.0.3@meta.data$res.0.3))
+
+clust.col <- hue_pal()(13)
+sil <- silhouette(my.clusters, dist = my.dist)
+sil.cols <- clust.col[ifelse(sil[,3] > 0, sil[,1], sil[,2])]
+sil.cols <- sil.cols[order(-sil[,1], sil[,3])]
+
+plot(sil, main = paste(length(unique(my.clusters)), "clusters"), 
+    border=sil.cols, col=sil.cols, do.col.sort=FALSE)
+```
+
+
+- Barplot of silhouette widths for cells in each cluster. Each cluster is assigned a colour and cells with positive widths are coloured according to the colour of its assigned cluster. Any cell with a negative width is coloured according to the colour of the cluster that it is closest to. The average width for all cells in each cluster is shown, along with the average width for all cells in the data set.
+
+
+###See if the possible outliter cells from scater should be removed (I decide not to)
+```{r}
+load(paste0(wd, "/outputs/output_01/possible_outliers.Rdata"))
+experiment.aggregate.0.3@meta.data$scater_outlier <- "NO"
+experiment.aggregate.0.3@meta.data[rownames(experiment.aggregate.0.3@meta.data) %in%
+                                     possible_outliers,]$scater_outlier <- "YES"
+table(experiment.aggregate.0.3@meta.data$scater_outlier)
+TSNEPlot(object = experiment.aggregate.0.3, group.by="scater_outlier", pt.size=0.5, do.return = TRUE)
+```
+
+
+
+#8. Output Marker Genes for each cluster
+```{r, eval=F}
+markers_all.0.3 <- FindAllMarkers(object = experiment.aggregate.0.3, min.pct = 0.25, 
+                                  thresh.use = 0.25, only.pos = TRUE, 
+                                  test.use = "wilcox")
+write.table(markers_all.0.3, file = paste0(wd, "/", out_dir, "/01_marker_genes.csv"), sep=",", col.names = NA)
+save("markers_all.0.3", file=paste0(wd, "/", out_dir, "/markers_all.0.3.RData"))
+```
+```{r}
+load(paste0(wd, "/", out_dir, "/markers_all.0.3.RData"))
+```
+```{r, eval=F, include=F}
+suppressPackageStartupMessages(library(dplyr))
+gene.markers <- read.csv("~/projects/scRNAseq_L5_Tbr1/raw_data/gene_annotations.csv")
+#top10_FC <- as.data.frame(markers_all.0.3[abs(markers_all.0.3$p_val_adj) < 0.05, ] %>% group_by(cluster) %>% top_n(10, avg_logFC))
+#top_markers <- markers_all.0.3[markers_all.0.3$gene %in% gene.markers$Gene, ]
+#top_markers <- top_markers[top_markers$p_val_adj < 0.005,]
+#output <- unique(rbind(top10_FC, top_markers))
+#output.annot <- merge(x=output, y=gene.markers[,c(2:5)], by.x="gene", by.y="Gene", all.x=TRUE)
+
+output.annot <- merge(x=markers_all.0.3, y=gene.markers[,c(2:5)], by.x="gene", by.y="Gene", all.x=TRUE)
+a<- output.annot[order(output.annot$cluster), c("gene","cluster","p_val_adj","avg_logFC",
+                                                "Region","Citation","Region.short")]
+#a[,c(1:4,7)]
+#write.table(a, paste0(out_dir,"/top10.csv"),sep=",", row.names = F) #personal preference
+write.table(a, paste0(out_dir,"/cluster_markers.csv"),sep=",", row.names = F) #personal preference
+```
+
+
+Cell Type           % of cells   Cluster    Known Cell Markers                    
+----------------    ----------   --------  ------------------------------  
+Neuronal              70.52%       0,1,2    Nrgn, Rorb, Cnih2                       
+Interneuron           11.54%       5,6,8    Dlx1, Dlx2, Arx, Gad2             
+Astrocyte             4.98%        4        Aldh1l1, Aqp4, Gja1, Mfge8      
+Microglia             5.31%        3        Aif1, C1qa, C1qb, Ctss          
+Endothelial           3.55%        7        Cldn5, Ctla2a, Igfbp7, Kdr      
+Pericyte              2.14%        10,11    Igf2, Col1a1, Col1a2, Dcn        
+Oligodendrocyte       1.92%        9        Gpr17, Olig2, Pdgfra, Itpr2      
+----------------    ----------   --------  ------------------------------  
+
+
+```{r}
+my.col = c("lightblue", "red")
+#Neuronal
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Nrgn","Rorb"), cols.use = my.col, nCol = 2, no.legend = F)
+#Interneron
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Dlx1","Dlx2","Arx","Gad2"), cols.use = my.col, nCol = 2, no.legend = F)
+#Astrocyte
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Aldh1l1","Aqp4","Gja1","Mfge8"), cols.use = my.col, nCol = 2, no.legend = F)
+#Microglia
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Aif1","C1qa","C1qb","Ctss"), cols.use = my.col, nCol = 2, no.legend = F)
+#Endothelial
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Cldn5","Ctla2a","Igfbp7","Kdr"), cols.use = my.col, nCol = 2, no.legend = F)
+#Pericyte
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Igf2","Col1a1","Col1a2","Dcn"), cols.use = my.col, nCol = 2, no.legend = F)
+#Oligo
+FeaturePlot(experiment.aggregate.0.3, features.plot = c("Gpr17","Olig2","Pdgfra","Itpr2"), cols.use = my.col, nCol = 2, no.legend = F)
+```
+
+
+#9. Relabel clusters with intial DEX results
+```{r, fig.height=10, fig.width=10}
+#TSNE
+current.cluster.ids <- c(0:11)
+new.cluster.ids <- c("Neuronal", "Neuronal", "Neuronal","Microglia","Astrocyte",
+                     "Interneuron","Interneuron","Endothelial","Interneuron",
+                     "Oligodendrocytes","Pericyte","Pericyte")
+experiment.aggregate.0.3@ident <- plyr::mapvalues(x = experiment.aggregate.0.3@ident, 
+                                                  from = current.cluster.ids, to = new.cluster.ids)
+p1 <- TSNEPlot(object = experiment.aggregate.0.3, pt.size = 0.1, do.return=TRUE)
+p1 <- p1 + ggtitle("tSNE by cell type")
+p2 <- TSNEPlot(object = experiment.aggregate.0.3, group.by="orig.ident", pt.size = 0.1, do.return=TRUE, colors.use = c("#F8766D","#7CAE00","skyblue"))
+p2 <- p2 + ggtitle("tSNE by genotype")
+grid.arrange(p1,p2,ncol=2)
+```
+
+```{r}
+#Cluster Tree
+suppressPackageStartupMessages(library(ape))
+data.tree <- experiment.aggregate.0.3@cluster.tree[[1]]
+data.tree$tip.label <- c("Neuronal", "Neuronal", "Neuronal","Microglia","Astrocyte",
+                     "Interneuron","Interneuron","Endothelial","Interneuron",
+                     "Oligodendrocytes","Pericyte","Pericyte")
+plot.phylo(x = data.tree, font = 1)
+i <- c(1,2,3) #Off one bc indexing
+nodelabels(pch = 19)
+tiplabels(data.tree$tip.label[i], i, adj = 0)
+```
+```{r}
+#TSNE  coloring just neuronal clusters
+experiment.aggregate.0.3@meta.data$neuronal <- "not.neuronal" 
+wt.cells <- grep("WT", rownames(experiment.aggregate.0.3@meta.data), value = T)
+null.cells <- grep("NULL", rownames(experiment.aggregate.0.3@meta.data), value = T)
+het.cells <- grep("HET", rownames(experiment.aggregate.0.3@meta.data), value = T)
+
+experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0:2) &
+                                     rownames(experiment.aggregate.0.3@meta.data) %in% wt.cells,]$neuronal <- "neuronal.WT"
+experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0:2) &
+                                     rownames(experiment.aggregate.0.3@meta.data) %in% null.cells,]$neuronal <- "neuronal.NULL"
+experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0:2) &
+                                     rownames(experiment.aggregate.0.3@meta.data) %in% het.cells,]$neuronal <- "neuronal.HET"
+TSNEPlot(object = experiment.aggregate.0.3, group.by="neuronal", pt.size=0.5, do.return = TRUE)
+```
+
+```{r, include=F}
+#Find percentage of cells that make up each group
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Neuronal"]) / length(experiment.aggregate.0.3@ident) ) *100
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Interneuron"]) / length(experiment.aggregate.0.3@ident) ) *100
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Astrocyte"]) / length(experiment.aggregate.0.3@ident) ) *100
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Microglia"]) / length(experiment.aggregate.0.3@ident) ) *100
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Endothelial"]) / length(experiment.aggregate.0.3@ident) ) *100
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Pericyte"]) / length(experiment.aggregate.0.3@ident) ) *100
+(length(experiment.aggregate.0.3@ident[experiment.aggregate.0.3@ident== "Oligodendrocytes"]) / length(experiment.aggregate.0.3@ident) ) *100
+```
+
+
+#10. Output only neuronal cells
+```{r, eval=F}
+neuronal_cells_to_keep <- rownames(experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0,1,2),])
+save(list = c("neuronal_cells_to_keep"), file=paste0(wd, "/", out_dir, "/neuronal_cells.RData"))
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+

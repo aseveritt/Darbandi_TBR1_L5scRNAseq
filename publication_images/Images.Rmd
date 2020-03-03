@@ -1,0 +1,581 @@
+
+
+```{r}
+setwd("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/")
+knitr::opts_knit$set(root.dir = "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/", cache=TRUE, autodep=TRUE)
+```
+
+#Figure 1
+```{r}
+nulldex <- read.csv("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/output_04/WTvsNULL.csv")
+hetdex <- read.csv("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/output_04/WTvsHET.csv")
+
+DEnull <-  paste0(nulldex[nulldex$fdr < 0.05, "gene"], ifelse(nulldex[nulldex$fdr < 0.05, "logfc"] > 0, "_UP","_DOWN"))
+DEhet <-  paste0(hetdex[hetdex$fdr < 0.05, "gene"], ifelse(hetdex[hetdex$fdr < 0.05, "logfc"] > 0, "_UP","_DOWN"))
+all_intersect <- gsub("_UP|_DOWN", "", intersect(DEnull, DEhet))
+common_down_dex <- gsub("_DOWN", "", grep("_DOWN", intersect(DEnull, DEhet), value=T))
+common_up_dex <- gsub("_UP", "", grep("_UP", intersect(DEnull, DEhet), value=T))
+
+#GO_common218 <- runGO(backgroundGenes = rownames(full_list[[1]]),DEgenes = all_intersect)
+#write.csv(GO_common218, file="~/projects/scRNAseq_L5_Tbr1/output_05/GO_common218.csv", quote = F)
+
+tmp <- merge(nulldex[nulldex$gene %in% all_intersect, c("fdr","logfc","gene")], 
+      hetdex[hetdex$gene %in% all_intersect, c("fdr","logfc","gene")], by ="gene", all = T)
+colnames(tmp) <- c("gene","FDR_NULL", "log2FC_NULL", "FDR_HET", "log2FC_HET")
+rownames(tmp) <- tmp$gene; tmp <- tmp[,-1]
+#write.csv(tmp, file="~/projects/scRNAseq_L5_Tbr1/output_05/common218.csv", quote = F)
+```
+```{r}
+load("../scripts/outputs/output_03/neuronal_object.RData")
+genes.to.keep <- all_intersect
+
+#randomly sample 1000 cells from each GT
+set.seed(123)
+cells.to.choose.from = experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3),]
+wt.sub <- sample(rownames(cells.to.choose.from[cells.to.choose.from$orig.ident == "WT",]), 1000)
+het.sub <- sample(rownames(cells.to.choose.from[cells.to.choose.from$orig.ident == "HET",]), 1000)
+null.sub <- sample(rownames(cells.to.choose.from[cells.to.choose.from$orig.ident == "NULL",]), 1000)
+kept_cells <- c(wt.sub, het.sub, null.sub)
+
+#reduce counts matrix. 
+counts <- experiment.aggregate@data
+counts <- as.matrix(counts[genes.to.keep, kept_cells]) #Set it up so that it will throw error if something isnt found
+#get z- score
+standardized_counts <- apply(counts, 1, function(x) (x-mean(x))/sd(x)) 
+
+counts <- t(standardized_counts)
+dim(counts)
+```
+```{r}
+HET_GO = read.csv( "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/output_05/HET_GO.csv")
+NULL_GO = read.csv( "/Users/AEveritt/projects/scRNAseq_L5_Tbr1/output_05/NULL_GO.csv")
+
+GO_list = list("Axon"= "GO:0030424",
+               "Synapse" = "GO:0045202",
+               "Dendrite" = "GO:0030425",
+               "Cell_Body" = "GO:0044297",
+               "Neurogenesis" = "GO:0022008")
+
+tmp_geneinfo <- data.frame(row.names = rownames(counts), stringsAsFactors = F)
+for (i in names(GO_list)){
+  GOgenes <- union(unlist(strsplit(as.character(HET_GO[HET_GO$category  %in% GO_list[[i]], "Genes"]), split= ", ")), 
+                       unlist(strsplit(as.character(NULL_GO[NULL_GO$category  %in% GO_list[[i]], "Genes"]), split= ", ")))
+  tmp_geneinfo[,i] = ifelse(rownames(tmp_geneinfo) %in% GOgenes, 1, 0 )
+}
+tmp_geneinfo$"." <- 0
+```
+```{r}
+library(circlize); library(RColorBrewer); library(ComplexHeatmap)
+col_fun = colorRamp2(c(-2, -1, 0, 1, 2), c("blue", "lightblue", "white", "orange","red"))
+
+#color_pal <- c("navy",  "#4EB3D3", "#CCEBC5","goldenrod1", "salmon")
+#color_pal <- c("#1B9E77", "#D95F02", "#7570B3", "#E7298A","#66A61E")
+color_pal <- c("#C51B7D", "#F1B6DA", "#E6F5D0", "#7FBC41", "#4D9221")
+name_order = c("Axon","Synapse","Dendrite", "Cell_Body","Neurogenesis")
+right_col_scheme = list(c("0" = "white", "1" = "white"),
+                        c("0" = "white", "1" = color_pal[1]),
+                        c("0" = "white", "1" = color_pal[2]),
+                        c("0" = "white", "1" = color_pal[3]),
+                        c("0" = "white", "1" = color_pal[4]),
+                        c("0" = "white", "1" = color_pal[5]))
+names(right_col_scheme) = c(".", name_order)
+ht1 = Heatmap(counts[rownames(counts) %in% common_down_dex,], 
+              col = col_fun,
+              cluster_columns = F, 
+              clustering_method_rows = "complete", clustering_distance_rows = "pearson",
+              row_dend_width = unit(5, "mm"), 
+              row_title = "Common Downregulated Genes\n in Tbr1 layer5 CKOs", row_title_side = "left",
+              row_title_gp = gpar(col = "black",fontface = "bold"),
+              column_title = "Cells", column_title_side = "top",
+              show_row_names = F, show_column_names = F,
+              show_heatmap_legend = F,
+              top_annotation = HeatmapAnnotation(df = data.frame("Genotype" = experiment.aggregate@meta.data[colnames(counts), "orig.ident"]),
+                                                 col = list("Genotype" = c("WT" =  "red", "HET" = "green", "NULL"="blue")), 
+                                                 gap = unit(1, "mm"),show_legend = F, which="column", show_annotation_name = F),
+              right_annotation = HeatmapAnnotation(df = data.frame(tmp_geneinfo[rownames(tmp_geneinfo) %in% common_down_dex,]),
+                                                   col = right_col_scheme, which="row",
+                                                   gp = gpar(col = "white"),show_legend = F, 
+                                                   simple_anno_size = unit(3, "mm"),
+                                                   show_annotation_name = T, annotation_name_rot = 90, annotation_name_side = "top", annotation_name_gp = gpar(cex=0.8))
+)
+
+ht2 = Heatmap(counts[rownames(counts) %in% common_up_dex,], 
+              col = col_fun,
+              cluster_columns = F, 
+              clustering_method_rows = "complete", clustering_distance_rows = "pearson",
+              row_dend_width = unit(5, "mm"), 
+              row_title = "Common Upregulated Genes\n in Tbr1 layer5 CKOs", row_title_side = "left",
+              row_title_gp = gpar(col = "black",fontface = "bold"),
+              column_title = "Cells", column_title_side = "top",
+              show_row_names = F, show_column_names = F,
+              show_heatmap_legend = F,
+              right_annotation = HeatmapAnnotation(df = data.frame(tmp_geneinfo[rownames(tmp_geneinfo) %in% common_up_dex,]),
+                                                   col = right_col_scheme, which="row",
+                                                   gp = gpar(col = "white"),show_legend = F, 
+                                                   simple_anno_size = unit(3, "mm"),
+                                                   show_annotation_name = F)
+)
+
+
+lgd_list = packLegend(
+    Legend(col_fun = col_fun, title = "Raw z-score", at = c(-2, -1, 0, 1, 2), 
+           direction = "horizontal", 
+           title_gp = gpar(fontsize = 7, fontface = "bold"), labels_gp = gpar(fontsize = 7)),
+    Legend(labels = c("Axon: GO:0030424", "Synapse: GO:0045202", "Dendrite: GO:0030425", "Cell Body: GO:0044297", "Neurogenesis: GO:0022008"), 
+           title = "Enriched Gene Ontology Terms", type = "grid", legend_gp = gpar(fill = color_pal), labels_gp = gpar(fontsize = 7),
+           title_gp = gpar(fontsize = 7, fontface = "bold")),
+    gap = unit(5, "mm")
+)
+
+```
+```{r}
+ht_list = ht1 %v% ht2
+final_heatmap <- draw(ht_list, 
+     padding = unit(c(8, 8, 8, 8), "mm"),
+     annotation_legend_list = lgd_list
+)
+final_heatmap = grid.grabExpr(draw(ht_list, 
+     padding = unit(c(8, 8, 8, 8), "mm"),
+     annotation_legend_list = lgd_list
+))
+```
+
+```{r}
+#Neuronal tSNE plot
+load("../scripts/outputs/output_03/neuronal_object.RData")
+experiment.aggregate@meta.data$Figure <- experiment.aggregate@meta.data$orig.ident
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$Figure == "NULL",]$Figure <- "NULL"
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(4,5),]$Figure <- "Atypical"
+experiment.aggregate@meta.data$Figure <- factor(experiment.aggregate@meta.data$Figure, 
+                                                levels = c("WT", "HET", "NULL", "Atypical"))
+neuronal_tsne <- TSNEPlot(object = experiment.aggregate, group.by="Figure", pt.size=0.5, colors.use = c("red","green","blue","grey"), do.return=T)
+
+#neuronal_tsne <- neuronal_tsne + theme(legend.position = "top")
+```
+
+```{r}
+setwd("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/")
+pdf(file="Figure1.pdf", width = 15, height = 9)
+plot_grid(
+          plot_grid(NULL, neuronal_tsne, NULL, ncol = 1, rel_heights = c(2/20,8/20,10/20)),
+          final_heatmap, ncol=2, nrow=1, rel_widths = c(1/2,1/2), #rel_heights = c(1/16, 15/16),
+          labels=c("A) tSNE fo WT and Tbr1 layer5 CKO Neuronal Cells", "B) Heatmap of Common DEX Genes from WT and Tbr1 layer5 CKOs"),
+          label_x = c(-0.25, -0.3))
+dev.off()
+```
+
+
+#Alternate Figure 1
+```{r}
+load("../scripts/outputs/output_03/neuronal_object.RData")
+
+kept_cells <- rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3),])
+counts <- as.matrix(experiment.aggregate@data)
+counts <- t(counts[, kept_cells])
+counts <- as.data.frame(counts)
+
+#DENSITY PLOTS OF INDIVIDUAL GENES
+amanda_density_plot <- function(i, my.ylim=1){
+  a <- as.data.frame(counts[, i,  drop=FALSE])
+  a$genotype <- "WT"
+  a[grep("NULL", rownames(a)),]$genotype <- "NULL"
+  a[grep("HET", rownames(a)),]$genotype <- "HET"
+  colnames(a) <- c("count","genotype")
+  a$genotype <- factor(a$genotype, levels = c("NULL", "HET", "WT"))
+  
+  p1 <- ggplot(a, aes(x=count, fill=genotype)) + 
+    geom_density(alpha= 0.7) +
+    scale_x_continuous(name="Normalized counts per cell") +
+    scale_fill_manual(values = c("blue", "green","red"), guide = guide_legend(reverse = TRUE)) +
+    ylim(0,my.ylim) + ylab("Frequency") +
+    ggtitle(i)
+
+  return(p1)
+}
+
+p1 <- amanda_density_plot("Calm2")  + 
+  theme(legend.justification = "top", legend.position = c(0.17,1), legend.background = element_rect(fill="transparent"),
+        legend.text = element_text(size=7), legend.title = element_text(size=9)) + 
+  ggtitle("Calm2") + ylab("\nFrequency") 
+p2 <- amanda_density_plot("Kif1a") + 
+  theme(legend.position = "none",axis.title.y = element_blank(),  axis.ticks.y = element_blank(), axis.text.y=element_blank()) +
+  ggtitle("Kif1a")
+p3 <- amanda_density_plot("Mgst3")  + 
+  theme(legend.position = "none" ,axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y=element_blank()) +
+  ggtitle("Mgst3")
+
+```
+
+```{r}
+neuronal_tsne <- neuronal_tsne+ ylab("\ntSNE_2")
+
+setwd("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/")
+pdf(file="Alt_Figure1.pdf", width = 15, height = 9)
+plot_grid(
+          plot_grid(NULL, neuronal_tsne, NULL, cbind(ggplotGrob(p1), ggplotGrob(p2), ggplotGrob(p3)), NULL, ncol = 1, 
+                    rel_heights = c(2/20,8/20,1/20, 8/20, 1/20),
+                    labels= c("", "", "","C) Density plots for select DEX genes", ""),
+                    label_x = c(0,0, 0, -0.155, 0), label_y = c(1, 1, 1, 1.1, 1)),
+          final_heatmap, ncol=2, nrow=1, rel_widths = c(1/2,1/2), #rel_heights = c(1/16, 15/16),
+          labels=c("A) tSNE for WT and Tbr1 layer5 CKO Neuronal Cells", "B) Heatmap of Common DEX Genes from WT and Tbr1 layer5 CKOs"),
+          label_x = c(-0.24, -0.3))
+dev.off()
+```
+
+
+
+#Figure S1
+```{r}
+#PART 1 QC plots
+load("unfiltered_expr_aggregate.Rdata")
+
+p1a <- ggplot(experiment.aggregate@meta.data, aes(x=nUMI)) + 
+  geom_histogram(binwidth=50, color="black", fill="white") + ggtitle("Distribution of nUMI- all cells") +
+  geom_vline(aes(xintercept=500),color="red") + geom_vline(aes(xintercept=10000),color="red") + theme_bw() +
+  scale_x_continuous(breaks=c(500, 10000, 30000, 50000)) + theme(axis.text.x = element_text(color=c("red","red",rep("black",4))))
+p1b <- VlnPlot(experiment.aggregate, "nUMI", do.return = TRUE) + geom_hline(yintercept = 10000, color= "red")
+p1b <- p1b + ggtitle("Distribution of nUMI by genotype") + xlab("Genotype") + ylab("Count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+p2a <- ggplot(experiment.aggregate@meta.data, aes(x=nGene)) + 
+  geom_histogram(binwidth=50, color="black", fill="white") + ggtitle("Distribution of nGene- all cells") +
+  geom_vline(aes(xintercept=500),color="red") + geom_vline(aes(xintercept=3000),color="red") + theme_bw() +
+  scale_x_continuous(breaks=c(500,3000,5000)) + theme(axis.text.x = element_text(color=c("red","red","black")))
+
+p2b <- VlnPlot(experiment.aggregate, "nGene", do.return = TRUE) + geom_hline(yintercept = 3000, color= "red")
+p2b <- p2b + ggtitle("Distribution of nGene by genotype") + xlab("Genotype") + ylab("Count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+p3a <- ggplot(experiment.aggregate@meta.data, aes(x=percent.mito)) + 
+  geom_histogram(binwidth=0.01, color="black", fill="white") + ggtitle("Distribution of mito % - all cells") +
+  geom_vline(aes(xintercept=0.3),color="red") + theme_bw() +
+  scale_x_continuous(breaks=c(0, 0.3, 0.50)) + theme(axis.text.x = element_text(color=c("black","red","black")))
+p3b <- VlnPlot(experiment.aggregate, "percent.mito", do.return = TRUE) + geom_hline(yintercept = 0.3, color= "red")
+p3b <- p3b + ggtitle("Distribution of mito % by genotype") + xlab("Genotype") + ylab("Count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+#grid.arrange(p1a,p2a, p3a, p1b, p2b, p3b, ncol=3)
+```
+```{r}
+#Full tSNE plot
+load("../scripts/outputs/output_02/experiment_aggregate.0.3.RData")
+
+#By Genotype
+experiment.aggregate.0.3@meta.data$Figure <- gsub("L5|/", "", experiment.aggregate.0.3@meta.data$orig.ident)
+experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$Figure == "NULL",]$Figure <- "NULL                   "
+experiment.aggregate.0.3@meta.data$Figure <- factor(experiment.aggregate.0.3@meta.data$Figure, levels = c("WT", "HET", "NULL                   "))
+byGeno <- TSNEPlot(object = experiment.aggregate.0.3, group.by="Figure", pt.size=0.1, do.label = F, do.return=T, colors.use = c("red", "green", "blue"), plot.order=c("HET","NULL                   ","WT"))
+
+#By Cell type
+current.cluster.ids <- c(0:11)
+new.cluster.ids <- c("Neuronal", "Neuronal", "Neuronal","Microglia","Astrocyte",
+                     "Interneuron","Interneuron","Endothelial","Interneuron",
+                     "Oligodendrocytes","Pericyte","Pericyte")
+experiment.aggregate.0.3@ident <- plyr::mapvalues(x = experiment.aggregate.0.3@ident, 
+                                                  from = current.cluster.ids, to = new.cluster.ids)
+byCellType <- TSNEPlot(object = experiment.aggregate.0.3, pt.size = 0.5, do.return=T, do.label = F,
+                      colors.use = c("#F8766D","#C49A00", "#53B400", "#00C094", "#00B6EB", "#A58AFF", "#FB61D7"))
+#byCellType <- TSNEPlot(object = experiment.aggregate.0.3, pt.size = 0.1, do.return=T, 
+#                      colors.use = c("#A58AFF", "#FCC7C3","#E7D597", "#B9E197", "#97E5D3", "#97E1F7", "#FDBEEE"))
+```
+```{r}
+#PART 2 QC plots
+
+load("../scripts/outputs/output_02/experiment_aggregate.0.3.RData")
+neuronal_cells <- rownames(experiment.aggregate.0.3@meta.data[experiment.aggregate.0.3@meta.data$res.0.3 %in% c(0,1,2),])
+experiment.aggregate <- SubsetData(experiment.aggregate.0.3, cells.use = neuronal_cells, do.clean = T)
+p4a <- ggplot(experiment.aggregate@meta.data, aes(x=nUMI)) + 
+  geom_histogram(binwidth=50, color="black", fill="white") + ggtitle("Distribution of nUMI - neuronal cells") +
+  geom_vline(aes(xintercept=4000),color="red") + geom_vline(aes(xintercept=500),color="red") + theme_bw() +
+  scale_x_continuous(breaks=c(500, 2000, 4000, 6000, 8000)) + theme(axis.text.x = element_text(color=c("red","black", "red", rep("black",2))))
+p4b <- VlnPlot(experiment.aggregate, "nUMI", do.return = TRUE, group.by = "orig.ident") + 
+  geom_hline(yintercept = 4000, color= "red")
+p4b <- p4b + ggtitle("Distribution of nUMI by genotype") + xlab("Genotype") + ylab("count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+p5a <- ggplot(experiment.aggregate@meta.data, aes(x=nGene)) + 
+  geom_histogram(binwidth=50, color="black", fill="white") + ggtitle("Distribution of nGene- neuronal cells") +
+  geom_vline(aes(xintercept=500),color="red") + geom_vline(aes(xintercept=1700),color="red") + theme_bw() +
+  scale_x_continuous(breaks=c(500, 1000, 1700, 2500)) + theme(axis.text.x = element_text(color=c("red","black", "red", "black")))
+p5b <- VlnPlot(experiment.aggregate, "nGene", do.return = TRUE, group.by = "orig.ident") +
+  geom_hline(yintercept = 1700, color= "red")
+p5b <- p5b + ggtitle("Distribution of nGene by genotype") + xlab("Genotype") + ylab("count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+p6a <- ggplot(experiment.aggregate@meta.data, aes(x=percent.mito)) + 
+  geom_histogram(binwidth=0.01, color="black", fill="white") + ggtitle("Distribution of mito % - neuronal cells") +
+  geom_vline(aes(xintercept=0.3),color="red") + theme_bw() +
+  scale_x_continuous(breaks=c(0.1, 0.2, 0.3)) + theme(axis.text.x = element_text(color=c(rep("black",2), "red")))
+p6b <- VlnPlot(experiment.aggregate, "percent.mito", do.return = TRUE, group.by = "orig.ident") +
+  geom_hline(yintercept = 0.299, color= "red")
+p6b <- p6b + ggtitle("Distribution of mito % by genotype") + xlab("Genotype") + ylab("count") + theme_bw() + 
+  theme(plot.title = element_text(color="black", size=12),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        legend.position = "none")
+
+#grid.arrange(p1a,p2a, p3a, p1b, p2b, p3b, ncol=3)
+```
+```{r}
+     
+#Neuronal tSNE plot
+load("../scripts/outputs/output_03/neuronal_object.RData")
+experiment.aggregate@meta.data$Figure <- experiment.aggregate@meta.data$orig.ident
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$Figure == "NULL",]$Figure <- "NULL                   "
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(4,5),]$Figure <- "Atypical"
+experiment.aggregate@meta.data$Figure <- factor(experiment.aggregate@meta.data$Figure, 
+                                                levels = c("WT", "HET", "NULL                   ", "Atypical"))
+neuronal_tsne <- TSNEPlot(object = experiment.aggregate, group.by="Figure", pt.size=0.5, colors.use = c("red","green","blue","grey"), do.return=T)
+
+#neuronal_tsne <- neuronal_tsne + theme(legend.position = "top")
+```
+```{r}
+#Find mitochondrial one
+setwd("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/")
+library("Seurat")
+dataset_loc <- "../raw_data/mm10"
+ids <- c("L5HET/", "L5NULL/","L5WT/", "pilot/L5_NULL_Run1/",  "pilot/L5_WT_Run1/")
+
+d10x.data <- sapply(ids, function(i){
+  print(i)
+  d10x <- Read10X(file.path(dataset_loc,i))
+  colnames(d10x) <- paste(sapply(strsplit(colnames(d10x),split="-"),'[[',1L),i,sep="-")
+  d10x
+})
+
+experiment.data <- do.call("cbind", d10x.data)
+experiment.aggregate <- CreateSeuratObject(
+  experiment.data,
+  project = "Sivash scRNA", 
+  names.field = 2,
+  min.cells = 17,
+  names.delim = "\\-")
+experiment.aggregate 
+
+mito.genes <- grep("^mt-", rownames(experiment.aggregate@data), value = T)
+percent.mito <- Matrix::colSums(experiment.aggregate@raw.data[mito.genes, ]) / Matrix::colSums(experiment.aggregate@raw.data)
+experiment.aggregate <- AddMetaData(
+  object = experiment.aggregate,
+  metadata = percent.mito,
+  col.name= "percent.mito")
+
+experiment.aggregate@meta.data$orig.ident <- gsub("_Run1","-Pilot", gsub("L5|/|pilot/|L5_", "", experiment.aggregate@meta.data$orig.ident))
+experiment.aggregate@meta.data$orig.ident <- factor(experiment.aggregate@meta.data$orig.ident, levels=c("WT","HET","NULL","WT-Pilot","NULL-Pilot") )
+mito.data <- VlnPlot(experiment.aggregate, "percent.mito", group.by = "orig.ident", do.return = TRUE, y.max=0.5) 
+
+mito.plot <- ggplot(mito.data$data, aes(x=ident, y=feature, fill=ident)) +
+    geom_jitter(alpha = 0.5) +
+    geom_boxplot(alpha = 0.8) + scale_fill_manual(values=c("red","green","blue","#FF5C5C","#5C5CFF")) +
+    ggtitle("Mitochondrial Fraction in pilot and manuscript datasets") +
+    ylab("Fraction of mitochondrial genes in cell") + xlab("") + 
+    theme_bw() + theme(legend.position = "none") +
+    geom_hline(yintercept = 0.3, color= "red") +
+    scale_y_continuous(breaks=c(0,0.1, 0.2,0.3,0.4, 0.5), limits = c(0,0.5)) + 
+  theme(axis.text.y = element_text(color=c(rep("black",3),"red","black","black")))
+```
+```{r}
+library(grid)
+p1a <- p1a + ylim(c(0,1500)) + ylab("Frequency of Counts") + ggtitle("")  #+ theme(axis.text.x =  element_text(size=6)) 
+p2a <- p2a + ylim(c(0,1500)) + ylab(" ") + ggtitle(" ") + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank())
+p3a <- p3a + ylim(c(0,1500)) + ylab(" ") + ggtitle(" ") + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank()) + xlab("fraction mito")
+
+p4a <- p4a + ylim(c(0,1500)) + ylab("Frequency of Counts") + ggtitle("")
+p5a <- p5a + ylim(c(0,1500)) + ylab(" ") + ggtitle(" ") + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank())
+p6a <- p6a + ylim(c(0,1500)) + ylab(" ") + ggtitle(" ") + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank()) + xlab("fraction mito")
+
+blank <- grid.rect(gp=gpar(col="white"))
+
+byCellType <- byCellType + ggtitle(" ")
+byGeno <- byGeno + ggtitle(" ")
+neuronal_tsne <- neuronal_tsne + ggtitle(" ")
+mito.plot <- mito.plot + ggtitle(" ") + ylab("Fraction of mito genes in cell") #+ theme(axis.title.y = element_text(size=9))
+
+setwd("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/")
+pdf(file="QCMetrics.pdf", width = 13, height = 9)
+plot_grid(blank,
+          plot_grid(cbind(ggplotGrob(p1a), ggplotGrob(p2a), ggplotGrob(p3a),  size = "last"),
+                    byCellType, rel_widths = c(3/5, 2/5), nrow=1, ncol=2, labels=c("A) Distribution and thresholds for all cells",
+                                                                                   "D) t-SNE all cells by cell type"),
+                    label_x = c(-0.19,-0.15)),
+          blank,
+          plot_grid(mito.plot, byGeno, rel_widths = c(3/5, 2/5), labels=c("B) Mitochondrial Fraction in pilot and manuscript datasets",
+                                                                          "E) t-SNE all cells by genotype"),
+                    label_x = c(-0.28,-0.15)),
+          blank, 
+          plot_grid(cbind(ggplotGrob(p4a), ggplotGrob(p5a), ggplotGrob(p6a),  size = "last"),
+                    neuronal_tsne, rel_widths = c(3/5, 2/5), nrow=1, ncol=2, labels=c("C) Distribution and thresholds for neuronal cells",
+                                                                                       "F) t-NSE neuronal cells by genotype"),
+                    label_x = c(-0.23,-0.196)),
+          nrow=6, ncol=1, rel_heights = c(1/21, 6/21, 1/21, 6/21, 1/21, 6/21) )
+dev.off()
+```
+
+
+
+
+```{r}
+#Neuronal tSNE plot
+load("../scripts/outputs/output_03/neuronal_object.RData")
+experiment.aggregate@meta.data$Figure <- experiment.aggregate@meta.data$orig.ident
+experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(4,5),]$Figure <- paste0(experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(4,5),]$Figure, "-atypical   ")
+
+experiment.aggregate@meta.data$Figure <- factor(experiment.aggregate@meta.data$Figure, 
+                                                levels = c("WT", "HET", "NULL", "WT-atypical   ", "HET-atypical   ","NULL-atypical   "))
+
+neuronal_tsne <- TSNEPlot(object = experiment.aggregate, group.by="Figure", pt.size=0.5, colors.use = c("red","green","blue",alpha(c("red","green","blue"), .1)), do.return=T) 
+```
+
+
+#Figure S2
+```{r}
+load("../scripts/outputs/output_03/neuronal_object.RData")
+fp <- FeaturePlot(experiment.aggregate, features.plot = c("Nrgn", "Bcl11b", "Foxp1","Neurod6"), cols.use = c("lightblue", "red"), nCol = 3, no.legend = F, do.return = T)
+```
+```{r}
+kept_cells <- rownames(experiment.aggregate@meta.data[experiment.aggregate@meta.data$res.0.3 %in% c(0:3),])
+counts <- as.matrix(experiment.aggregate@data)
+counts <- t(counts[, kept_cells])
+counts <- as.data.frame(counts)
+
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(grid))
+
+
+#DENSITY PLOTS OF INDIVIDUAL GENES
+amanda_density_plot <- function(i, my.ylim=1){
+  a <- as.data.frame(counts[, i,  drop=FALSE])
+  a$genotype <- "WT"
+  a[grep("NULL", rownames(a)),]$genotype <- "NULL"
+  a[grep("HET", rownames(a)),]$genotype <- "HET"
+  colnames(a) <- c("count","genotype")
+  a$genotype <- factor(a$genotype, levels = c("NULL", "HET", "WT"))
+  
+  p1 <- ggplot(a, aes(x=count, fill=genotype)) + 
+    geom_density(alpha= 0.7) +
+    scale_x_continuous(name="Normalized counts per cell") +
+    scale_fill_manual(values = c("blue", "green","red"), guide = guide_legend(reverse = TRUE)) +
+    ylim(0,my.ylim) + ylab("Frequency") +
+    ggtitle(i)
+
+  return(p1)
+}
+
+amanda_box_plot <- function(i){
+  a <- as.data.frame(counts[, i,  drop=FALSE])
+  a$genotype <- "WT"
+  a[grep("NULL", rownames(a)),]$genotype <- "NULL"
+  a[grep("HET", rownames(a)),]$genotype <- "HET"
+  colnames(a) <- c("count","genotype")
+  a$genotype <- factor(a$genotype, levels = c("WT", "HET", "NULL"))
+  b<- a[a$count != 0 , ]
+  
+  p1<- ggplot(b, aes(x=genotype, y=count, fill=genotype)) +
+    geom_jitter(alpha = 0.5) +
+    geom_boxplot(alpha = 0.8) + scale_fill_manual(values=c("red","green","blue")) +
+    ggtitle(paste0("Density of ", i," expression")) +
+    ylab("Normalized counts per cell") +
+    xlab("")
+  return(p1)
+}
+
+amanda_violin_plot <- function(i){
+    a <- as.data.frame(counts[, i,  drop=FALSE])
+  a$genotype <- "WT"
+  a[grep("NULL", rownames(a)),]$genotype <- "NULL"
+  a[grep("HET", rownames(a)),]$genotype <- "HET"
+  colnames(a) <- c("count","genotype")
+  a$genotype <- factor(a$genotype, levels = c("WT", "HET", "NULL"))
+  b<- a[a$count != 0 , ]
+  
+  p1<- ggplot(b, aes(x=genotype, y=count, fill=genotype)) +
+    geom_jitter(alpha = 0.5) +
+    geom_violin(alpha = 0.8) + scale_fill_manual(values=c("red","green","blue")) +
+    ggtitle(paste0("Density of ", i," expression")) +
+    ylab("Normalized counts per cell") +
+    xlab("")
+  return(p1)
+}
+```
+
+```{r}
+nrgn <- fp$Nrgn
+nrgn <- nrgn + theme(legend.justification = "top", legend.position = c(0.92,1), legend.background = element_rect(fill="transparent"), 
+                     legend.title.align = 0, legend.text = element_text(size=7), legend.title = element_text(size=7),legend.key.size = unit(0.8,"line")) + 
+  scale_colour_gradient(name = "counts", low ="lightblue", high= "red") + ggtitle("A) Nrgn")
+Bcl11b <- fp$Bcl11b
+Bcl11b <- Bcl11b + theme(legend.justification = "top", legend.position = c(0.92,1), legend.background = element_rect(fill="transparent"), 
+                      legend.title.align = 0, axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y=element_blank(),
+                      legend.text = element_text(size=7), legend.title = element_text(size=7),legend.key.size = unit(0.8,"line")) +
+        scale_colour_gradient(name = "counts", low ="lightblue", high= "red") + ggtitle("B) Bcl11b")
+foxp1 <- fp$Foxp1
+foxp1 <- foxp1 + theme(legend.justification = "top", legend.position = c(0.92,1), legend.background = element_rect(fill="transparent"), 
+                       legend.title.align = 0, axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y=element_blank(),
+                       legend.text = element_text(size=7), legend.title = element_text(size=7),legend.key.size = unit(0.8,"line")) +
+          scale_colour_gradient(name = "counts", low ="lightblue", high= "red") + ggtitle("C) Foxp1")
+neurod6 <- fp$Neurod6
+neurod6 <- neurod6 + theme(legend.justification = "top", legend.position = c(0.92,1), legend.background = element_rect(fill="transparent"), 
+                       legend.title.align = 0, axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y=element_blank(),
+                       legend.text = element_text(size=7), legend.title = element_text(size=7),legend.key.size = unit(0.8,"line")) +
+          scale_colour_gradient(name = "counts", low ="lightblue", high= "red") + ggtitle("D) Neurod6")
+
+p1 <- amanda_density_plot("Calm2")  + 
+  theme(legend.justification = "top", legend.position = c(0.9,1), legend.background = element_rect(fill="transparent"),
+        legend.text = element_text(size=7), legend.title = element_text(size=9)) + 
+  ggtitle("E) Calm2") 
+p2 <- amanda_density_plot("Mgst3") + 
+  theme(legend.justification = "top", legend.position = c(0.9,1), legend.background = element_rect(fill="transparent"),
+        axis.title.y = element_blank(),  axis.ticks.y = element_blank(), axis.text.y=element_blank(),
+        legend.text = element_text(size=7), legend.title = element_text(size=9)) +
+  ggtitle("F) Mgst3")
+p3 <- amanda_density_plot("Kif1a")  + 
+  theme(legend.justification = "top", legend.position = c(0.9,1), legend.background = element_rect(fill="transparent"),
+        axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y=element_blank(),
+        legend.text = element_text(size=7), legend.title = element_text(size=9)) +
+  ggtitle("G) Kif1a")
+p4 <- amanda_density_plot("Cox7b")  + 
+  theme(legend.justification = "top", legend.position = c(0.9,1), legend.background = element_rect(fill="transparent"),
+        axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y=element_blank(),
+        legend.text = element_text(size=7), legend.title = element_text(size=9)) +
+  ggtitle("H) Cox7b")
+
+blank <- grid.rect(gp=gpar(col="white"))
+
+setwd("/Users/AEveritt/projects/scRNAseq_L5_Tbr1/scRNAseq_L5_Tbr1_Rpackage/publication_images/")
+pdf(file="CellMarkers.pdf", width = 15, height = 9)
+plot_grid(blank,
+          cbind(ggplotGrob(nrgn), ggplotGrob(Bcl11b), ggplotGrob(foxp1), ggplotGrob(neurod6),  size = "last"),
+          blank,
+          cbind(ggplotGrob(p1), ggplotGrob(p2), ggplotGrob(p3), ggplotGrob(p4), size = "last"), 
+          rel_heights = c(1/16,7/16,1/16, 7/16), nrow=4, ncol=1, labels = c( "", "i) Feature Plots of L5 Markers","", "ii) Density Plots of select differentially expressed genes"), label_x = c(0, -0.073, 0,  -0.15) , label_y = c(1, 1.054, 1, 1.054))
+dev.off()
+```
+
+
+
+```{r}
+load("~/projects/scRNAseq_L5_Tbr1/other_analyses/old_analysis_v1-7/version5/neuronal_cells/Checkpoint1.RData")
+fp <- FeaturePlot(experiment.aggregate.0.3, 
+            features.plot = c("Mgst3","Calm1","Wnt7b","Kif1a", "Calm2"), 
+            cols.use = c("lightblue", "red"), 
+            nCol = 3, no.legend = T, do.return = T)
+ugh <- TSNEPlot(object = experiment.aggregate.0.3, group.by="orig.ident", pt.size=0.5, do.return=T, colors.use = c("black","green"))
+plot_grid(ugh, fp$Mgst3, fp$Calm1, fp$Calm2, fp$Wnt7b, fp$Kif1a, ncol=3)
+
+```
+
+
